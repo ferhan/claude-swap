@@ -1,0 +1,9 @@
+// Copy this to Signing.xcconfig (gitignored) and fill in the Team ID:
+//
+//     cp Signing.xcconfig.example Signing.xcconfig
+//
+// The 10-character Apple Developer Team ID. Find it at
+// https://developer.apple.com/account -> Membership details. Until it is set,
+// the build fails with "has entitlements that require signing with a
+// development certificate".
+DEVELOPMENT_TEAM =

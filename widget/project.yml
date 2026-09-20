@@ -1,0 +1,101 @@
+# XcodeGen spec for the cswap macOS widget.
+#
+# The .xcodeproj is generated (`xcodegen generate`) and gitignored: a
+# project.pbxproj conflicts badly in git and hides real changes in review.
+# Everything that matters about the project lives in this file.
+
+name: CswapWidget
+
+options:
+  bundleIdPrefix: com.cswap
+  deploymentTarget:
+    macOS: "14.0"   # Button(intent:)/Toggle(isOn:intent:) need macOS 14
+  createIntermediateGroups: true
+  # Signing.xcconfig is gitignored (it holds a per-developer Team ID), so a
+  # fresh clone does not have one until it is copied from the .example.
+  # Generation must not fail on that; the build will, with a clear message.
+  disabledValidations: [missingConfigFiles]
+
+configs:
+  Debug: debug
+  Release: release
+
+# DEVELOPMENT_TEAM only. Kept out of git so filling in one value locally is
+# the whole signing setup -- see README.md.
+configFiles:
+  Debug: Signing.xcconfig
+  Release: Signing.xcconfig
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    CODE_SIGN_STYLE: Automatic
+    # Required for Developer ID / notarization, which is how this ships.
+    ENABLE_HARDENED_RUNTIME: YES
+
+targets:
+  # Stub. WidgetKit extensions cannot ship standalone, so the widget needs a
+  # host; this one exists only to be that container. The real UI is the cswap
+  # CLI/TUI and the menu bar -- do not grow this into a second front end.
+  CswapWidgetHost:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.cswap.widget
+        CODE_SIGN_ENTITLEMENTS: App/CswapWidgetHost.entitlements
+        INFOPLIST_KEY_NSHumanReadableCopyright: ""
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: cswap Widget
+        LSApplicationCategoryType: public.app-category.developer-tools
+    dependencies:
+      - target: CswapWidgetExtension
+        embed: true
+
+  CswapWidgetExtension:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: Widget
+      # The snapshot model is shared verbatim with the test target rather than
+      # linked through a framework: two sources entries beat a third product.
+      - path: Shared
+    settings:
+      base:
+        # Must stay prefixed by the host's bundle id.
+        PRODUCT_BUNDLE_IDENTIFIER: com.cswap.widget.extension
+        # Sandbox + a read exception for the one snapshot file. No App Group:
+        # the writer is the user's unsigned PyPI `cswap`, which cannot hold the
+        # entitlement a group container demands.
+        CODE_SIGN_ENTITLEMENTS: Widget/CswapWidgetExtension.entitlements
+        SKIP_INSTALL: YES
+    info:
+      path: Widget/Info.plist
+      properties:
+        CFBundleDisplayName: cswap
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+
+  # Logic tests only -- no TEST_HOST. The decoder is pure, so hosting the tests
+  # in the app would only couple them to the app's signing.
+  CswapWidgetTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+      - path: Shared
+      # The Python producer's golden fixture, referenced where it already
+      # lives. Copying it into widget/ would give the contract two sources of
+      # truth, which is the one thing the fixture exists to prevent.
+      - path: ../tests/fixtures/snapshot_golden.json
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.cswap.widget.tests
+        # The tests read the fixture out of their own bundle; a sandbox here
+        # would only make the bundle harder to load.
+        CODE_SIGN_ENTITLEMENTS: ""

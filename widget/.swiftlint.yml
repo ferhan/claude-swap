@@ -1,0 +1,7 @@
+# SwiftLint defaults. Run with `swiftlint` from widget/.
+
+included:
+  - App
+  - Widget
+  - Shared
+  - Tests

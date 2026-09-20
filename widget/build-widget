@@ -1,0 +1,157 @@
+#!/bin/bash
+# Build the cswap macOS widget from this checkout, and put it where macOS can
+# find it.
+#
+#   ./build-widget install     build it signed, install the host app into
+#                              ~/Applications and register its extension, so
+#                              the widget appears in the widget gallery
+#   ./build-widget uninstall   deregister the extension and remove the app
+#   ./build-widget release     Developer ID archive -> notarized, stapled .dmg
+#
+# The gallery only offers a widget whose extension pkd has registered, and pkd
+# only looks inside apps LaunchServices knows about. So "install" is a copy
+# plus an lsregister -- nothing is launched and no window is opened.
+#
+# Build products land in build/, which is gitignored.
+set -euo pipefail
+
+WIDGET="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$WIDGET"
+
+APPEX_ID="com.cswap.widget.extension"
+APPEX_REL="Contents/PlugIns/CswapWidgetExtension.appex"
+DEST="$HOME/Applications/CswapWidgetHost.app"
+BUILD="$WIDGET/build"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
+
+die() { echo "$*" >&2; exit 1; }
+
+registered() { pluginkit -m -i "$APPEX_ID" 2>/dev/null | grep -q .; }
+
+# $1 is the certificate kind the chosen command needs.
+preflight() {
+    xcodebuild -version >/dev/null 2>&1 || die \
+"xcodebuild is unusable. Install Xcode, then point at it:
+    sudo xcode-select -s /Applications/Xcode.app"
+    command -v xcodegen >/dev/null || die \
+"xcodegen not found. Install it:
+    brew install xcodegen"
+    [[ -f Signing.xcconfig ]] || die \
+"widget/Signing.xcconfig is missing. Create it once:
+    cp Signing.xcconfig.example Signing.xcconfig
+then set DEVELOPMENT_TEAM to your 10-character Team ID, from
+https://developer.apple.com/account -> Membership details."
+    grep -q '^DEVELOPMENT_TEAM *= *[A-Z0-9]' Signing.xcconfig || die \
+"DEVELOPMENT_TEAM is empty in widget/Signing.xcconfig. Set it to your
+10-character Team ID, from https://developer.apple.com/account ->
+Membership details."
+    security find-identity -v -p codesigning | grep -q "$1" || die \
+"No \"$1\" certificate in the keychain.
+Xcode > Settings > Accounts > Manage Certificates creates a development one;
+a Developer ID Application certificate comes from
+https://developer.apple.com/account/resources/certificates and is what
+notarization requires."
+    xcodegen generate
+}
+
+install_widget() {
+    preflight "Apple Development"
+    xcodebuild -project CswapWidget.xcodeproj -scheme CswapWidgetHost \
+        -configuration Debug -derivedDataPath "$BUILD/dd" build
+    BUILT="$BUILD/dd/Build/Products/Debug/CswapWidgetHost.app"
+
+    # xcodebuild registers whatever it just built. Two registered copies of one
+    # extension bundle id and pkd keeps only the last it saw, so drop the build
+    # directory's copy before registering the installed one.
+    "$LSREGISTER" -u "$BUILT"
+    rm -rf "$DEST"
+    mkdir -p "$(dirname "$DEST")"
+    ditto "$BUILT" "$DEST"
+    "$LSREGISTER" -f -R -trusted "$DEST"
+
+    # pkd picks the change up asynchronously.
+    for _ in 1 2 3 4 5; do
+        registered && break
+        sleep 1
+    done
+    registered || die \
+"Installed $DEST but pkd did not register the extension.
+Check it with: pluginkit -m -v -i $APPEX_ID
+A copy built by Xcode.app can hold the registration instead; unregister it with
+    $LSREGISTER -u <that .app>
+and run this again."
+    pluginkit -m -v -i "$APPEX_ID"
+    echo "Installed $DEST"
+    echo "Add it from the widget gallery: right-click the desktop > Edit Widgets."
+}
+
+uninstall_widget() {
+    if [[ -d "$DEST" ]]; then
+        pluginkit -r "$DEST/$APPEX_REL" || true
+        "$LSREGISTER" -u "$DEST"
+        rm -rf "$DEST"
+        sleep 2
+    fi
+    ! registered || die \
+"Removed $DEST but the extension is still registered. Something else is
+holding it -- find it with: pluginkit -m -v -i $APPEX_ID"
+    echo "Removed $DEST"
+}
+
+release() {
+    preflight "Developer ID Application"
+    rm -rf "$BUILD/CswapWidget.xcarchive" "$BUILD/export"
+    xcodebuild -project CswapWidget.xcodeproj -scheme CswapWidgetHost \
+        -configuration Release -archivePath "$BUILD/CswapWidget.xcarchive" \
+        -allowProvisioningUpdates archive
+
+    # Generated rather than committed: it carries the Team ID, and build/ is
+    # gitignored.
+    TEAM="$(sed -n 's/^DEVELOPMENT_TEAM *= *//p' Signing.xcconfig | tr -d ' ')"
+    cat > "$BUILD/ExportOptions.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>method</key><string>developer-id</string>
+	<key>teamID</key><string>$TEAM</string>
+	<key>signingStyle</key><string>automatic</string>
+</dict>
+</plist>
+PLIST
+    xcodebuild -exportArchive -archivePath "$BUILD/CswapWidget.xcarchive" \
+        -exportOptionsPlist "$BUILD/ExportOptions.plist" \
+        -exportPath "$BUILD/export" -allowProvisioningUpdates
+
+    # A plain `xcodebuild build` injects com.apple.security.get-task-allow,
+    # which notarization rejects outright. Prove the exported extension is
+    # clean before spending a submission on it.
+    APP="$BUILD/export/CswapWidgetHost.app"
+    if codesign -d --entitlements - --xml "$APP/$APPEX_REL" 2>/dev/null \
+        | plutil -p - | grep -q get-task-allow; then
+        die \
+"The exported extension carries com.apple.security.get-task-allow, which
+notarization rejects. That entitlement comes from a debug build, so the
+archive was not exported with method developer-id."
+    fi
+
+    VERSION="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+    DMG="$BUILD/cswap-widget-$VERSION.dmg"
+    hdiutil create -volname "cswap Widget" -srcfolder "$APP" -ov -format UDZO "$DMG"
+    codesign --sign "Developer ID Application" --timestamp "$DMG"
+
+    xcrun notarytool submit "$DMG" --keychain-profile "${NOTARY_PROFILE:-cswap-notary}" --wait || die \
+"notarytool failed. If the keychain profile does not exist yet, create it once:
+    xcrun notarytool store-credentials ${NOTARY_PROFILE:-cswap-notary} \\
+        --apple-id <you@example.com> --team-id $TEAM \\
+        --password <app-specific password from appleid.apple.com>"
+    xcrun stapler staple "$DMG"
+    echo "$DMG"
+}
+
+case "${1:-}" in
+    install)   install_widget ;;
+    uninstall) uninstall_widget ;;
+    release)   release ;;
+    *) echo "usage: $(basename "$0") [install|uninstall|release]" >&2; exit 2 ;;
+esac
