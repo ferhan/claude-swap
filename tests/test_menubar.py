@@ -408,6 +408,70 @@ def test_usage_summary_omits_countdown_when_passed_or_missing():
     assert menubar.usage_summary(usage, _NOW) == "5h 53% · 7d 8%"
 
 
+# --- title reset countdown -----------------------------------------------------
+
+def test_title_countdown_drops_leading_zero_units():
+    assert menubar._title_countdown({"resets_at": _iso(2 * 3600 + 47 * 60)}, _NOW) == "2h 47m"
+    assert menubar._title_countdown({"resets_at": _iso(9 * 60)}, _NOW) == "9m"
+    # unlike _live_countdown, the minutes survive past a day
+    assert menubar._title_countdown(
+        {"resets_at": _iso(4 * 86400 + 3 * 3600 + 22 * 60)}, _NOW
+    ) == "4d 3h 22m"
+    assert menubar._title_countdown({"resets_at": _iso(2 * 86400 + 5 * 60)}, _NOW) == "2d 0h 5m"
+
+
+def test_title_countdown_none_when_passed_or_missing():
+    assert menubar._title_countdown({"resets_at": _iso(-60)}, _NOW) is None
+    assert menubar._title_countdown({"pct": 5.0}, _NOW) is None
+    assert menubar._title_countdown("no credentials", _NOW) is None
+
+
+def test_format_title_appends_reset_countdown_when_enabled():
+    s = menubar.MenuBarSettings(
+        show_account_name=False, title_pct="both", title_reset_countdown=True
+    )
+    usage = {
+        "five_hour": {"pct": 47.0, "resets_at": _iso(3 * 3600 + 8 * 60)},
+        "seven_day": {"pct": 30.0, "resets_at": _iso(2 * 86400 + 14 * 3600 + 5 * 60)},
+    }
+    assert menubar.format_title("loc@x.com", usage, s, now=_NOW) == "⇄ 47% (3h 8m) · 30% (2d 14h 5m)"
+
+
+def test_format_title_reset_countdown_off_by_default():
+    s = menubar.MenuBarSettings(show_account_name=False, title_pct="both")
+    assert not s.title_reset_countdown
+    usage = {
+        "five_hour": {"pct": 47.0, "resets_at": _iso(3 * 3600 + 8 * 60)},
+        "seven_day": {"pct": 30.0, "resets_at": _iso(2 * 86400)},
+    }
+    assert menubar.format_title("loc@x.com", usage, s, now=_NOW) == "⇄ 47% · 30%"
+
+
+def test_format_title_reset_countdown_omitted_when_window_lacks_resets_at():
+    s = menubar.MenuBarSettings(
+        show_account_name=False, title_pct="both", title_reset_countdown=True
+    )
+    usage = {"five_hour": {"pct": 47.0}, "seven_day": {"pct": 30.0, "resets_at": _iso(3600)}}
+    assert menubar.format_title("loc@x.com", usage, s, now=_NOW) == "⇄ 47% · 30% (1h 0m)"
+
+
+def test_format_title_reset_countdown_uses_rolled_weekly_reset():
+    # a passed weekly reset rolls to the next 7-day boundary -> 0% and a fresh countdown
+    s = menubar.MenuBarSettings(
+        show_account_name=False, title_pct="7d", title_reset_countdown=True
+    )
+    usage = {"seven_day": {"pct": 88.0, "resets_at": _iso(-3600)}}
+    assert menubar.format_title("loc@x.com", usage, s, now=_NOW) == "⇄ 0% (6d 23h 0m)"
+
+
+def test_format_title_reset_countdown_applies_to_scoped_models():
+    s = menubar.MenuBarSettings(
+        show_account_name=False, title_pct="off", title_scoped=True, title_reset_countdown=True
+    )
+    usage = {"scoped": [{"name": "Fable", "pct": 55.0, "resets_at": _iso(86400 + 2 * 3600)}]}
+    assert menubar.format_title("loc@x.com", usage, s, now=_NOW) == "⇄ Fable 55% (1d 2h 0m)"
+
+
 # --- switch-history log parsing ------------------------------------------------
 
 _SWITCH_LOG = (

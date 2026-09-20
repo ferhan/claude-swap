@@ -97,6 +97,7 @@ class MenuBarSettings:
     show_account_name: bool = True
     title_pct: str = "both"  # one of TITLE_PCT_CHOICES
     title_scoped: bool = False  # append per-model weekly limits (e.g. Fable) to the title
+    title_reset_countdown: bool = False  # append each title percentage's time to reset
     refresh_interval: int = 60
     auto_switch_enabled: bool = False
 
@@ -186,6 +187,30 @@ def _live_countdown(window: dict | str | None, now: float) -> str | None:
     minutes = rem // 60
     if days > 0:
         return f"{days}d {hours}h"
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+def _title_countdown(window: dict | str | None, now: float) -> str | None:
+    """Time to reset for the menu-bar title, e.g. ``2h 47m`` / ``4d 3h 22m``.
+
+    Same shape as :func:`_live_countdown` but keeps the minutes past a day, since
+    the title is the only place the weekly reset is visible at a glance. Leading
+    zero units are dropped (``9m``, not ``0d 0h 9m``). Returns ``None`` when the
+    window has no usable ``resets_at``.
+    """
+    ts = _resets_at_ts(window)
+    if ts == float("inf"):
+        return None
+    remaining = int(ts - now)
+    if remaining <= 0:
+        return None
+    days, rem = divmod(remaining, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    if days > 0:
+        return f"{days}d {hours}h {minutes}m"
     if hours > 0:
         return f"{hours}h {minutes}m"
     return f"{minutes}m"
@@ -298,6 +323,16 @@ def _local_part(email: str, limit: int = 12) -> str:
     return local
 
 
+def _pct_segment(pct: float, window: dict | None, settings: MenuBarSettings, now: float) -> str:
+    """One title percentage, with its time to reset appended when enabled."""
+    seg = f"{pct:.0f}%"
+    if settings.title_reset_countdown:
+        countdown = _title_countdown(window, now)
+        if countdown:
+            seg += f" ({countdown})"
+    return seg
+
+
 def format_title(
     active_email: str | None,
     active_usage: dict | str | None,
@@ -316,20 +351,21 @@ def format_title(
     if settings.title_pct in ("5h", "both"):
         p = _window_pct(active_usage, "five_hour")
         if p is not None:
-            segments.append(f"{p:.0f}%")
+            segments.append(_pct_segment(p, active_usage["five_hour"], settings, now))
     if settings.title_pct in ("7d", "both"):
         seven = active_usage.get("seven_day") if isinstance(active_usage, dict) else None
         seven = _rolled_weekly_window(seven, now)  # reflect a passed weekly reset
         p = seven["pct"] if isinstance(seven, dict) and isinstance(seven.get("pct"), (int, float)) else None
         if p is not None:
-            segments.append(f"{p:.0f}%")
+            segments.append(_pct_segment(p, seven, settings, now))
     if settings.title_scoped and isinstance(active_usage, dict):
         # Per-model weekly limits (e.g. Fable), same shape/roll-forward as the
         # dropdown rows; named so multiple scoped models stay distinguishable.
         for window in active_usage.get("scoped") or []:
             window = _rolled_weekly_window(window, now)
             if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)) and window.get("name"):
-                segments.append(f"{window['name']} {window['pct']:.0f}%")
+                seg = _pct_segment(window["pct"], window, settings, now)
+                segments.append(f"{window['name']} {seg}")
     if not segments:
         return ICON
     return f"{ICON} " + " · ".join(segments)
@@ -640,6 +676,11 @@ def run(switcher) -> int:
             if self._dirty:
                 self._dirty = False
                 self.rebuild_menu()
+            elif self.settings.title_reset_countdown:
+                # The countdown advances on the clock, not on refreshes (which can
+                # be 5 minutes apart), so retitle in place — no menu rebuild, which
+                # would churn rumps' callback registry every second.
+                self._retitle()
             self._detect_active_change()
             self._drain_engine_events()
 
@@ -732,13 +773,18 @@ def run(switcher) -> int:
                 return 0
 
         # ---- menu construction -----------------------------------------------
-        def rebuild_menu(self):
-            self.title = format_title(
+        def _retitle(self):
+            title = format_title(
                 self.snapshot["active_email"],
                 self.snapshot["active_usage"],
                 self.settings,
                 alias=self.snapshot.get("active_alias"),
             )
+            if title != self.title:
+                self.title = title
+
+        def rebuild_menu(self):
+            self._retitle()
             # Stop a rumps memory leak: rumps registers each menu item's callback
             # in the process-global NSApp._ns_to_py_and_callback, but Menu.clear()
             # never removes them, so rebuilding the whole menu on every refresh
@@ -859,6 +905,12 @@ def run(switcher) -> int:
             )
             scoped_item.state = 1 if self.settings.title_scoped else 0
             menu.add(scoped_item)
+
+            countdown_item = rumps.MenuItem(
+                "Display time to quota reset", callback=self.on_toggle_reset_countdown
+            )
+            countdown_item.state = 1 if self.settings.title_reset_countdown else 0
+            menu.add(countdown_item)
 
             interval = rumps.MenuItem("Refresh interval")
             labels = {30: "30 seconds", 60: "60 seconds", 300: "5 minutes"}
@@ -1012,6 +1064,10 @@ def run(switcher) -> int:
 
         def on_toggle_scoped(self, _sender):
             self.settings.title_scoped = not self.settings.title_scoped
+            self._save_and_rebuild()
+
+        def on_toggle_reset_countdown(self, _sender):
+            self.settings.title_reset_countdown = not self.settings.title_reset_countdown
             self._save_and_rebuild()
 
         def _make_title_pct(self, mode):
