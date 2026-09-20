@@ -37,7 +37,7 @@ import random
 import threading
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import ClassVar
@@ -45,13 +45,26 @@ from typing import ClassVar
 from claude_swap import oauth, poll_policy
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.json_output import SCHEMA_VERSION, USAGE_TOKEN_EXPIRED
-from claude_swap.locking import FileLock
+from claude_swap.locking import (
+    EngineLock,
+    FileLock,
+    describe_engine_holder,
+    engine_lock_holder,
+    engine_lock_path,
+)
 from claude_swap.poll_policy import (
     ESCALATION_MARGIN_PCT,
     RESET_SLACK_S,
     binding_pct,
 )
-from claude_swap.settings import AutoSwitchSettings, atomic_write_json, parse_model_names
+from claude_swap.settings import (
+    AutoSwitchSettings,
+    atomic_write_json,
+    load_settings,
+    parse_model_names,
+)
+from claude_swap.snapshot_json import snapshot_payload, write_snapshot
+from claude_swap.snapshot_source import SnapshotSource
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.usage_store import due_candidate, plan_oversleeps_interval
 
@@ -293,6 +306,11 @@ class AutoSwitchEvent:
             "schemaVersion": SCHEMA_VERSION,
             "event": self.kind,
             "ts": self.ts,
+            # The rendered line travels with the payload so a reader of
+            # someone else's stream (see ``BackendEventLog``) does not need a
+            # second renderer for nine payload shapes, drifting against this
+            # one. Additive, like every other field here.
+            "human": self.human(),
             **self._fields(),
         }
 
@@ -492,6 +510,116 @@ class ConfigWarningEvent(AutoSwitchEvent):
 
 
 # ---------------------------------------------------------------------------
+# Reading another process's event stream
+# ---------------------------------------------------------------------------
+
+# How far back from the end of the log a first poll looks. One event per tick
+# at 60s is a small file per day, but a service running since install is not,
+# and nobody needs a month of history to fill a screen.
+_BACKFILL_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True)
+class BackendEvent:
+    """One event replayed from another engine's JSONL stream.
+
+    Deliberately NOT an :class:`AutoSwitchEvent`. Those are what an engine
+    *emits*; rebuilding nine typed payloads out of JSON would be a second
+    parser drifting against the first, for no gain — a surface needs the kind
+    (to style, and to decide what deserves a notification) and the rendered
+    line, and the stream carries both.
+    """
+
+    kind: str
+    ts: str
+    text: str
+    dry_run: bool = False
+
+    def human(self) -> str:
+        return self.text
+
+
+def parse_event_line(line: str) -> BackendEvent | None:
+    """One JSONL line from ``cswap auto --json``, or None if it isn't one.
+
+    Tolerant on purpose: the same log holds whatever else the process wrote —
+    a backend installed before the service emitted JSON logs human lines, and
+    a crash logs a traceback. Neither is an event; neither should raise.
+    """
+    line = line.strip()
+    if not line.startswith("{"):
+        return None
+    try:
+        payload = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict) or "event" not in payload:
+        return None
+    kind = str(payload["event"])
+    return BackendEvent(
+        kind=kind,
+        ts=str(payload.get("ts") or ""),
+        text=str(payload.get("human") or kind),
+        dry_run=bool(payload.get("dryRun", False)),
+    )
+
+
+class BackendEventLog:
+    """Follow the backend service's event log from a surface.
+
+    Detection, not notification, exactly like the state watch: the backend
+    writes its stream and never learns whether anyone is reading. A surface
+    polls this from the tick it already has, and a poll with nothing appended
+    costs one ``stat``.
+
+    ``backfill`` is how many trailing events the first poll yields. The TUI
+    wants a few, so a screen opened between the backend's 60s ticks is not
+    blank; the menu bar wants none, because replaying old events would fire
+    notifications for switches that happened yesterday.
+    """
+
+    def __init__(self, path: Path, *, backfill: int = 20) -> None:
+        self._path = Path(path)
+        self._backfill = backfill
+        self._offset: int | None = None  # None until the first poll primes it
+
+    def poll(self) -> list[BackendEvent]:
+        """Events appended since the last poll (see ``backfill`` for the first)."""
+        try:
+            size = self._path.stat().st_size
+        except OSError:
+            return []
+        priming = self._offset is None
+        if priming:
+            self._offset = max(0, size - _BACKFILL_BYTES)
+        elif size < self._offset:
+            self._offset = 0  # truncated or rotated under us
+        if size <= self._offset:
+            return []
+        start = self._offset
+        try:
+            with self._path.open("rb") as fh:
+                fh.seek(start)
+                chunk = fh.read()
+        except OSError:
+            return []
+        parts = chunk.split(b"\n")
+        # Bytes after the final newline are a line still being written: leave
+        # them behind so the next poll sees the whole event, not half of one.
+        self._offset = start + len(chunk) - len(parts.pop())
+        if priming and start > 0 and parts:
+            parts.pop(0)  # the backfill window almost certainly opened mid-line
+        events = [
+            event
+            for event in (parse_event_line(p.decode("utf-8", "replace")) for p in parts)
+            if event is not None
+        ]
+        if not priming:
+            return events
+        return events[-self._backfill :] if self._backfill else []
+
+
+# ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
 
@@ -646,10 +774,23 @@ class AutoSwitchEngine:
         *,
         dry_run: bool = False,
         state_path: Path | None = None,
+        snapshot_path: Path | None = None,
         clock: Callable[[], float] = time.time,
     ):
         self.switcher = switcher
         self.settings = settings
+        # Policy lives in settings.json and any surface may edit it while we
+        # run, so every tick re-reads the file (see ``_reload_settings``).
+        # What this process was handed ON TOP of the file — CLI flags, the
+        # TUI's session threshold — has to survive that re-read, so remember
+        # exactly where the two disagreed at construction and keep winning
+        # those fields.
+        on_disk = load_settings(switcher.backup_dir)
+        self._pinned = {
+            f.name: getattr(settings, f.name)
+            for f in fields(settings)
+            if getattr(settings, f.name) != getattr(on_disk, f.name)
+        }
         # Model(s) whose per-model weekly limit also binds the switch decision
         # (empty = account-wide 5h/7d only). ``settings.model`` is a comma-
         # separated list ("Fable", "Opus,Sonnet", "all"); parse once here and
@@ -663,7 +804,20 @@ class AutoSwitchEngine:
         self.on_event = on_event
         self.dry_run = dry_run
         self.state_path = state_path or (switcher.backup_dir / STATE_FILENAME)
+        # Where to publish the display projection, or None to publish nothing
+        # (the TUI and the menu bar render in-process and want no file).
+        self.snapshot_path = snapshot_path
+        self._snapshot_source = (
+            SnapshotSource(switcher) if snapshot_path is not None else None
+        )
         self.clock = clock
+        # Whether THIS tick may actually move the active account: false under
+        # --dry-run and whenever ``autoswitch.enabled`` is off. Seeded from
+        # dry_run so a ``_perform`` reached outside a tick still honours it.
+        self._no_switch = dry_run
+        # Taken on the first tick (see ``_ensure_engine_lock``): exactly one
+        # engine may run against one set of accounts.
+        self._engine_lock: EngineLock | None = None
         self._stop = threading.Event()
         # Cuts the current inter-tick sleep short (a session threshold change
         # from the TUI should show a fresh decision now, not next interval).
@@ -684,6 +838,34 @@ class AutoSwitchEngine:
         # warned) on the first tick where every relevant account has readable
         # usage — adaptive polling legitimately leaves gaps before that.
         self._model_check_done = not self._models
+
+    # -- singleton engine lock ----------------------------------------------
+
+    def _ensure_engine_lock(self) -> bool:
+        """Take the machine's one engine lock, before this engine's first tick.
+
+        Lazy rather than in ``__init__`` so constructing an engine costs
+        nothing: the lock is about *ticking*, and both entry points that tick
+        (``run_loop`` and a one-shot ``tick``, i.e. ``cswap auto --once``
+        racing the backend) come through here. Held for the engine's life —
+        released in ``run_loop``'s finally, and by the kernel if we die.
+        """
+        if self._engine_lock is None:
+            self._engine_lock = EngineLock(engine_lock_path(self.state_path.parent))
+        if self._engine_lock.acquire():
+            return True
+        holder = engine_lock_holder(self._engine_lock.lock_path) or {}
+        self._emit(
+            ErrorEvent(
+                message=(
+                    "another cswap engine already owns this machine's accounts: "
+                    f"{describe_engine_holder(holder)} — not starting a second one"
+                ),
+                # Not transient: nothing this engine does will change it.
+                transient=False,
+            )
+        )
+        return False
 
     # -- state file ---------------------------------------------------------
 
@@ -876,24 +1058,78 @@ class AutoSwitchEngine:
 
     # -- tick -----------------------------------------------------------------
 
+    def _reload_settings(self) -> AutoSwitchSettings:
+        """The file's policy with this process's overrides back on top.
+
+        Re-read per tick because the engine outlives every editor of
+        settings.json: a menu bar toggling ``autoswitch.enabled`` or a
+        ``cswap config set`` must reach a service running since login without
+        a restart. Still assigned exactly once per tick, so a tick decides on
+        one coherent set of values and nothing needs locking.
+
+        The model axes are the one exception: ``self._models`` and the state
+        derived from them are fixed at construction (the same reason
+        ``apply_threshold`` moves the threshold and nothing else), so keep
+        ``model`` in step with them rather than letting the file drift it.
+        """
+        settings = replace(
+            load_settings(self.switcher.backup_dir), **self._pinned
+        )
+        settings = replace(settings, model=self.settings.model)
+        if settings.threshold != self.settings.threshold:
+            self.switcher.set_poll_policy_inputs(settings.threshold, self._models)
+        self.settings = settings
+        return settings
+
+    def _write_snapshot(self) -> None:
+        """Publish the display projection for out-of-process readers.
+
+        Store-only: this engine is already the collector, and a second
+        eligibility pass per tick would let the published file drive network
+        traffic of its own (``SnapshotSource``'s own contract for shells that
+        host an engine). Best-effort — a full disk or an unwritable path is
+        reported and dropped, never allowed to end the loop.
+        """
+        try:
+            write_snapshot(
+                self.snapshot_path,
+                snapshot_payload(self._snapshot_source.take(store_only=True)),
+            )
+        except Exception as e:
+            _logger.warning(
+                "could not write snapshot %s: %r", self.snapshot_path, e
+            )
+
     def tick(self) -> TickOutcome:
         """Evaluate once: poll usage, maybe switch. Never raises."""
+        if not self._ensure_engine_lock():
+            # Someone else is the engine. Don't poll, don't decide, and don't
+            # republish the snapshot over the holder's — just report.
+            return TickOutcome.ERROR
         try:
-            return self._tick_inner()
+            outcome = self._tick_inner()
         except ClaudeSwitchError as e:
             self._emit(ErrorEvent(message=str(e), transient=True))
-            return TickOutcome.ERROR
+            outcome = TickOutcome.ERROR
         except Exception as e:  # pragma: no cover - safety net
             self._emit(
                 ErrorEvent(message=f"{type(e).__name__}: {e}", transient=True)
             )
-            return TickOutcome.ERROR
+            outcome = TickOutcome.ERROR
+        if self.snapshot_path is not None:
+            self._write_snapshot()
+        return outcome
 
     def _tick_inner(self) -> TickOutcome:
         self._sleep_until_ts = None
         self._blocked_wait_long = False
         self._idle_hold_slow = False
-        settings = self.settings
+        settings = self._reload_settings()
+        # Poll-only and dry-run reach the same place — a decision, reported,
+        # never acted on — but not the same way: dry-run writes NOTHING, while
+        # a poll-only backend is still the process maintaining this machine's
+        # state, so its quarantine releases below must land.
+        self._no_switch = self.dry_run or not settings.enabled
         state = self._read_state()
         if not self.dry_run:
             # Dry-run must not write anything, so recovered quarantines are
@@ -1332,9 +1568,10 @@ class AutoSwitchEngine:
                         )
                     )
                     return TickOutcome.NO_ACTION
-            if self.dry_run:
-                # Dry-run stops at the decision: no token refresh, no
-                # quarantine writes — freshening is a mutation.
+            if self._no_switch:
+                # Stop at the decision: no token refresh, no quarantine
+                # writes — freshening is a mutation, and nothing is going to
+                # be activated.
                 return self._perform(num, email, trigger, left_snapshot)
             status = self._freshen_target(num, email)
             if status == "identity-conflict":
@@ -2103,7 +2340,7 @@ class AutoSwitchEngine:
         trigger: str,
         left: tuple[float | None, float],
     ) -> TickOutcome:
-        if self.dry_run:
+        if self._no_switch:
             current = self.switcher.current_account_number()
             current_email = self.switcher.account_email(current) if current else ""
             self._emit(
@@ -2279,7 +2516,10 @@ class AutoSwitchEngine:
         """Session override from the TUI: retarget the trigger and poll
         cadence mid-run. Threshold only — the model axes (and their derived
         state) are fixed at construction. The frozen-settings swap is atomic
-        and each tick snapshots ``self.settings`` once, so no locking."""
+        and each tick snapshots ``self.settings`` once, so no locking.
+        Pinned, or the next tick's re-read of settings.json would put the
+        file's threshold straight back."""
+        self._pinned["threshold"] = threshold
         self.settings = replace(self.settings, threshold=threshold)
         self.switcher.set_poll_policy_inputs(threshold, self._models)
 
@@ -2335,7 +2575,22 @@ class AutoSwitchEngine:
             return delay
 
     def run_loop(self) -> int:
-        """Tick forever (until :meth:`stop`); a failing tick never kills it."""
+        """Tick forever (until :meth:`stop`); a failing tick never kills it.
+
+        Returns non-zero when another process already owns the engine, so a
+        surface hosting this in a thread simply ends up with no engine (and
+        the refusal in its event log) instead of a second one.
+        """
+        if not self._ensure_engine_lock():
+            return 1
+        lock = self._engine_lock
+        try:
+            return self._run_loop_inner()
+        finally:
+            if lock is not None:
+                lock.release()
+
+    def _run_loop_inner(self) -> int:
         while True:
             # Clear at the top, not after the wait: a wake() racing a wait
             # timeout is then never lost — the tick right after this clear

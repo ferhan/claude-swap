@@ -24,9 +24,11 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Footer, RichLog, Static
 
+from claude_swap import launch_agent
 from claude_swap.autoswitch import (
     AutoSwitchEngine,
     AutoSwitchEvent,
+    BackendEventLog,
     binding_pct,
     pct_label,
 )
@@ -84,6 +86,13 @@ class AutoScreen(Screen):
         # screen reverts to on exit; ``_entry_threshold`` is the value when
         # adjust mode was entered (wake/log only on a net change).
         self._adjusting = False
+        # Who owns the engine, decided at mount from the engine LOCK, not
+        # from the launchd label: this screen hosts one only when nothing
+        # else does, and the badge must not claim a mode it isn't in.
+        self._owner = launch_agent.ENGINE_NONE
+        # Set when the backend owns the engine: its events arrive by tailing
+        # its log instead of through an in-process callback.
+        self._backend_log: BackendEventLog | None = None
         self._configured_threshold: float | None = None
         self._entry_threshold: float | None = None
 
@@ -111,6 +120,35 @@ class AutoScreen(Screen):
         self._update_summary()
         self.watch(self.app, "snapshot", self._on_snapshot)
         self.watch(self.app, "theme", self._on_theme_change)
+        # Whoever already holds the engine lock owns auto-switching: a second
+        # engine here would poll and decide independently against the same
+        # accounts. So the screen either hosts one or becomes a window onto
+        # the one that exists — and says which, rather than guessing from the
+        # launchd label (which misses a hand-run `cswap auto` entirely).
+        self._owner, detail = launch_agent.engine_owner(self.app.switcher.backup_dir)
+        if self._owner == launch_agent.ENGINE_BACKEND:
+            self._note(
+                "— the cswap auto backend service owns auto-switching; "
+                "showing its event stream —"
+            )
+            self._backend_log = BackendEventLog(
+                launch_agent.log_paths(launch_agent.AUTO_LABEL)[0]
+            )
+            self.set_interval(1.0, self._poll_backend_log)
+            self._poll_backend_log()
+            self._update_badge()
+            return
+        if self._owner == launch_agent.ENGINE_OTHER:
+            # No log path is known for a hand-run engine, so this screen can
+            # show its accounts but not its decisions. Saying so beats a badge
+            # that implies this screen is the one deciding.
+            self._note(
+                f"— another process already owns auto-switching ({detail}); "
+                "this screen is showing its accounts, not running an engine "
+                "of its own, and its event stream is not ours to read —"
+            )
+            self._update_badge()
+            return
         self._start_engine(dry_run=True)
 
     def on_unmount(self) -> None:
@@ -122,6 +160,19 @@ class AutoScreen(Screen):
         if self._configured_threshold is not None:
             self.app.threshold_pct = self._configured_threshold
         self.app.set_store_only(False)
+
+    def _note(self, message: str) -> None:
+        """A muted line about the screen itself, not about an engine event."""
+        self.query_one("#event-log", RichLog).write(
+            Text(message, style=Palette.from_theme(self.app.current_theme).muted)
+        )
+
+    def _poll_backend_log(self) -> None:
+        """Render whatever the backend has appended since the last tick."""
+        if self._backend_log is None:
+            return
+        for event in self._backend_log.poll():
+            self._on_engine_event(event)
 
     def _on_theme_change(self, _theme: str) -> None:
         self._update_summary()
@@ -214,6 +265,7 @@ class AutoScreen(Screen):
             dry_run=dry_run,
         )
         self._engine = engine
+        self._owner = launch_agent.ENGINE_SELF
         self.run_worker(
             engine.run_loop,
             thread=True,
@@ -222,14 +274,8 @@ class AutoScreen(Screen):
             name=f"auto-engine-{'dry' if dry_run else 'live'}",
         )
         self._update_badge()
-        log = self.query_one("#event-log", RichLog)
         mode = "DRY-RUN (watching only)" if dry_run else "LIVE (will switch accounts)"
-        log.write(
-            Text(
-                f"— engine started: {mode} —",
-                style=Palette.from_theme(self.app.current_theme).muted,
-            )
-        )
+        self._note(f"— engine started: {mode} —")
 
     def _emit_from_thread(self, event: AutoSwitchEvent) -> None:
         """Engine ``on_event`` callback — runs on the worker thread."""
@@ -275,7 +321,15 @@ class AutoScreen(Screen):
 
     def _update_badge(self) -> None:
         badge = self.query_one("#mode-badge", Static)
-        if self._engine is not None and not self._engine.dry_run:
+        if self._owner == launch_agent.ENGINE_BACKEND:
+            badge.update(" BACKEND ")
+            badge.set_classes("dry")
+        elif self._owner == launch_agent.ENGINE_OTHER:
+            # Not DRY-RUN: that would claim this screen is watching without
+            # switching, when in fact another process may be switching live.
+            badge.update(" EXTERNAL ")
+            badge.set_classes("dry")
+        elif self._engine is not None and not self._engine.dry_run:
             badge.update(" LIVE ")
             badge.set_classes("live")
         else:

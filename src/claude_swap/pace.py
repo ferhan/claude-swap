@@ -20,9 +20,9 @@ evaluated against the clock it was actually measured at.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
-# Weekly windows reset on a fixed 7-day cadence (matches menubar._WEEKLY_PERIOD_S).
+# Weekly windows reset on a fixed 7-day cadence.
 WEEKLY_PERIOD_S = 7 * 86400.0
 
 # Suppress the marker for this long after a weekly reset. Right after reset,
@@ -60,6 +60,38 @@ def _resets_at_ts(resets_at: object) -> float | None:
         return datetime.fromisoformat(resets_at).timestamp()
     except ValueError:
         return None
+
+
+def rolled_weekly_window(window: dict | None, now: float) -> dict | None:
+    """A weekly window with a passed reset advanced to its next 7-day boundary.
+
+    Weekly limits reset on a fixed weekly cadence, so once the stored
+    ``resets_at`` is in the past we know the window rolled over — the stored pct
+    belongs to a window that no longer exists. Return a copy reflecting the reset
+    state (``pct`` 0, ``resets_at`` advanced to the next future boundary) so a
+    display shows the reset from the static schedule alone, without waiting to
+    spend tokens on a fresh fetch. Missing/future/unparseable windows are
+    returned unchanged.
+
+    Lives here rather than in the menu bar so every presentation surface (the
+    menu bar and ``cswap snapshot``) reports an elapsed weekly window the same
+    way, and so pace is always computed against the rolled window — pairing
+    last cycle's pct with this cycle's freshly-reset display would otherwise
+    read as "ahead".
+    """
+    if not isinstance(window, dict):
+        return window
+    ts = _resets_at_ts(window.get("resets_at"))
+    if ts is None or ts > now:
+        return window
+    missed = int((now - ts) // WEEKLY_PERIOD_S) + 1
+    new_ts = ts + missed * WEEKLY_PERIOD_S
+    rolled = dict(window)
+    rolled["pct"] = 0.0
+    rolled["resets_at"] = datetime.fromtimestamp(new_ts, tz=timezone.utc).isoformat()
+    rolled.pop("countdown", None)  # recomputed live from the rolled resets_at
+    rolled.pop("clock", None)
+    return rolled
 
 
 def compute_pace(

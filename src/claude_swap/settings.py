@@ -43,6 +43,11 @@ class AutoSwitchSettings:
     ping-pong while a strictly better account is always taken.
     """
 
+    # Master switch. Off means poll-only: the engine measures, evaluates and
+    # reports, but never moves the active account. Default off because a
+    # backend service installed for its measurements must not start rotating
+    # accounts on its own — switching stays something a surface opts into.
+    enabled: bool = False
     threshold: float = 90.0
     interval_seconds: float = 60.0
     cooldown_seconds: float = 300.0
@@ -102,6 +107,10 @@ class SettingSpec:
 SETTING_SPECS: dict[str, SettingSpec] = {
     spec.dotted: spec
     for spec in (
+        SettingSpec(
+            "autoswitch", "enabled", "enabled", "bool",
+            help="Let the engine actually switch accounts (off: poll only)",
+        ),
         SettingSpec(
             "autoswitch", "threshold", "threshold", "float", 50.0, 99.9,
             help="Switch when the binding 5h/7d window reaches this pct",

@@ -25,10 +25,10 @@ import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, fields
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
-from claude_swap import pace
+from claude_swap import launch_agent, pace, state_watch
 from claude_swap.exceptions import ClaudeSwitchError, CredentialReadError
 from claude_swap.printer import warning
 from claude_swap.switcher import SENTINEL_NOTES
@@ -88,10 +88,11 @@ def ensure_notification_identity(
 class MenuBarSettings:
     """User-configurable menu bar display behavior, persisted as JSON.
 
-    Only display preferences and the auto-switch on/off toggle live here.
-    Auto-switch *policy* (threshold, cooldown, hysteresis, …) is core config,
-    read/written through ``claude_swap.settings`` (the ``autoswitch.*`` keys),
-    so the CLI and the menu bar share one source of truth.
+    Only display preferences live here. Auto-switch config — the on/off
+    toggle included — is core config, read/written through
+    ``claude_swap.settings`` (the ``autoswitch.*`` keys), so the CLI, the
+    backend service and the menu bar share one source of truth: a toggle
+    that lands in a UI-local file reaches no other process.
     """
 
     show_account_name: bool = True
@@ -99,7 +100,6 @@ class MenuBarSettings:
     title_scoped: bool = False  # append per-model weekly limits (e.g. Fable) to the title
     title_reset_countdown: bool = False  # append each title percentage's time to reset
     refresh_interval: int = 60
-    auto_switch_enabled: bool = False
 
     @classmethod
     def load(cls, path: Path) -> "MenuBarSettings":
@@ -216,33 +216,9 @@ def _title_countdown(window: dict | str | None, now: float) -> str | None:
     return f"{minutes}m"
 
 
-_WEEKLY_PERIOD_S = 7 * 86400  # weekly limits reset on a fixed 7-day cadence
-
-
-def _rolled_weekly_window(window: dict | None, now: float) -> dict | None:
-    """A weekly window with a passed reset advanced to its next 7-day boundary.
-
-    Weekly limits reset on a fixed weekly cadence, so once the stored
-    ``resets_at`` is in the past we know the window rolled over — the stored pct
-    belongs to a window that no longer exists. Return a copy reflecting the reset
-    state (``pct`` 0, ``resets_at`` advanced to the next future boundary) so the
-    menu bar shows the reset from the static schedule alone, without waiting to
-    spend tokens on a fresh fetch. Missing/future/unparseable windows are
-    returned unchanged.
-    """
-    if not isinstance(window, dict):
-        return window
-    ts = _resets_at_ts(window)
-    if ts == float("inf") or ts > now:
-        return window
-    missed = int((now - ts) // _WEEKLY_PERIOD_S) + 1
-    new_ts = ts + missed * _WEEKLY_PERIOD_S
-    rolled = dict(window)
-    rolled["pct"] = 0.0
-    rolled["resets_at"] = datetime.fromtimestamp(new_ts, tz=timezone.utc).isoformat()
-    rolled.pop("countdown", None)  # recomputed live from the rolled resets_at
-    rolled.pop("clock", None)
-    return rolled
+# The weekly roll-forward lives in ``pace`` so the menu bar and ``cswap
+# snapshot`` report an elapsed weekly window identically.
+_rolled_weekly_window = pace.rolled_weekly_window
 
 
 def usage_summary(
@@ -424,6 +400,23 @@ def parse_switch_history(log_text: str, limit: int = SWITCH_HISTORY_LIMIT) -> li
     return out[-limit:][::-1]
 
 
+def engine_owner_label(state: str, detail: str) -> str:
+    """The menu line naming which process is running the auto-switch engine.
+
+    Three cases have to be told apart, because the honest answer differs:
+    this app is ticking, the backend service is, or something else is (a
+    hand-run ``cswap auto``, another surface). Claiming the first when it is
+    the third is the bug this line exists to make impossible to hide.
+    """
+    if state == launch_agent.ENGINE_SELF:
+        return "Engine: this menu bar"
+    if state == launch_agent.ENGINE_BACKEND:
+        return "Engine: backend service"
+    if state == launch_agent.ENGINE_OTHER:
+        return f"Engine: {detail}"
+    return "Engine: not running"
+
+
 def _account_display_usage(entry) -> dict | str | None:
     """Menu-display usage for a ``UsageEntry``.
 
@@ -583,7 +576,7 @@ def run(switcher) -> int:
         AppKit.NSApplicationActivationPolicyAccessory
     )
 
-    from claude_swap.autoswitch import AutoSwitchEngine
+    from claude_swap.autoswitch import AutoSwitchEngine, BackendEventLog
     from claude_swap.settings import load_settings, set_setting
     from claude_swap.snapshot_source import SnapshotSource
 
@@ -606,13 +599,23 @@ def run(switcher) -> int:
             self._snapshot_at = 0.0
             self._refreshing = False
             self._config_path = switcher._get_claude_config_path()
-            self._config_mtime = 0.0
+            # One watch over every file that holds state, so a change made
+            # anywhere -- this menu, a terminal, the backend, the TUI --
+            # reaches the menu within ~1s (see claude_swap.state_watch).
+            self._watch = state_watch.StateWatcher(
+                self._config_path, switcher.backup_dir
+            )
             self._last_usage_log: dict = {}  # account num -> last-logged (5h, 7d) key
             # Auto-switch engine (the same one `cswap auto` runs), hosted in a
-            # background thread while enabled.
+            # background thread while enabled -- and only while nothing else
+            # is already running one (see _refresh_owner).
             self._engine = None
             self._engine_events: list = []
             self._event_lock = threading.Lock()
+            self._owner = (launch_agent.ENGINE_NONE, "")
+            # Set while the backend owns the engine: its events arrive through
+            # its log instead of an in-process callback.
+            self._backend_log = None
             self.rebuild_menu()
             # Background display refresh on the user's interval, plus a fast
             # UI-sync tick that applies snapshots + engine events on the main thread.
@@ -621,7 +624,7 @@ def run(switcher) -> int:
             self.sync_timer = rumps.Timer(self.on_sync_tick, 1)
             self.sync_timer.start()
             self.refresh_async()  # first display fetch
-            if self.settings.auto_switch_enabled:
+            if self._auto_enabled():
                 self._start_engine()
 
         # ---- display refresh plumbing ----------------------------------------
@@ -681,35 +684,68 @@ def run(switcher) -> int:
                 # be 5 minutes apart), so retitle in place — no menu rebuild, which
                 # would churn rumps' callback registry every second.
                 self._retitle()
-            self._detect_active_change()
+            self._detect_state_change()
             self._drain_engine_events()
 
-        def _detect_active_change(self):
-            # Reflect account switches from any source (menu, CLI, auto engine)
-            # within ~1s. Detecting *which* account is active is a cheap local
-            # read of ~/.claude.json -- no Keychain or usage API -- so we can do
-            # it on every tick. We gate the read on the file's mtime (a cheap
-            # stat) so a large config isn't parsed each second, and only kick a
-            # refresh when the active email actually changed (Claude Code rewrites
-            # this file often for unrelated reasons).
+        def _detect_state_change(self):
+            # Reflect a change made anywhere -- this menu, `cswap switch` or
+            # `cswap add` in a terminal, the backend, the TUI -- within ~1s.
+            # Everything watched is a cheap local file read (no Keychain, no
+            # usage API), which is what makes a per-second check affordable;
+            # measurements stay on the refresh timer, where the usage store
+            # paces them for every surface alike.
             if self._refreshing:
-                return  # a worker is already in-flight; it refreshes the marker
-            try:
-                mtime = self._config_path.stat().st_mtime
-            except OSError:
+                return  # a worker is already in flight; it repaints anyway
+            changed = self._watch.poll()
+            if not changed:
                 return
-            if mtime == self._config_mtime:
-                return
-            self._config_mtime = mtime
-            current = self.switcher._get_current_account()
-            email = current[0] if current else None
-            if email and email != self.snapshot.get("active_email"):
+            if state_watch.SETTINGS in changed:
+                # autoswitch.enabled may have moved under us. The engine
+                # re-reads threshold and interval per tick on its own, so
+                # only the on/off decision needs acting on here.
+                self._sync_engine_to_settings()
+                self.rebuild_menu()  # its check marks are read from the file
+            if changed - {state_watch.SETTINGS}:
                 self.refresh_async()
 
         # ---- auto-switch engine ----------------------------------------------
+        def _refresh_owner(self):
+            """Re-read who is actually running an engine, and follow it.
+
+            The launchd label alone is the wrong question (see
+            ``launch_agent.engine_owner``): answering from it leaves the menu
+            claiming to run auto-switching while a hand-run ``cswap auto``
+            holds the lock and this app's engine has already been refused.
+            """
+            self._owner = launch_agent.engine_owner(self.switcher.backup_dir)
+            if self._owner[0] == launch_agent.ENGINE_BACKEND:
+                if self._backend_log is None:
+                    # backfill=0: replaying yesterday's switches as macOS
+                    # notifications is worse than showing nothing.
+                    self._backend_log = BackendEventLog(
+                        launch_agent.log_paths(launch_agent.AUTO_LABEL)[0],
+                        backfill=0,
+                    )
+            else:
+                self._backend_log = None
+
         def _start_engine(self):
             """Run the core AutoSwitchEngine (live) in a background thread."""
             if self._engine is not None:
+                return
+            self._refresh_owner()
+            if self._owner[0] not in (
+                launch_agent.ENGINE_NONE,
+                launch_agent.ENGINE_SELF,
+            ):
+                # Something already owns an engine. Two engines do not corrupt
+                # anything (switching is flock-serialized) but they decide
+                # policy independently and would fight over it, so the UI
+                # defers and just displays what the owner does.
+                self.switcher._logger.info(
+                    "auto-switch engine not started: already held by %s",
+                    self._owner[1],
+                )
                 return
             try:
                 engine = AutoSwitchEngine(
@@ -742,6 +778,13 @@ def run(switcher) -> int:
                 self._stop_engine()
                 self._start_engine()
 
+        def _sync_engine_to_settings(self):
+            """Follow an autoswitch.enabled toggled by someone else."""
+            if self._auto_enabled():
+                self._start_engine()
+            else:
+                self._stop_engine()
+
         def _on_engine_event(self, event):
             # Runs on the engine thread; must not raise. Queue for the main
             # thread, which surfaces notifications and reacts on the sync tick.
@@ -751,6 +794,11 @@ def run(switcher) -> int:
         def _drain_engine_events(self):
             with self._event_lock:
                 events, self._engine_events = self._engine_events, []
+            if self._backend_log is not None:
+                # Not our engine's callback: the backend's stream, tailed from
+                # its launchd log. Same handling either way — a switch is a
+                # switch whichever process made it.
+                events = [*events, *self._backend_log.poll()]
             for ev in events:
                 if ev.kind == "switch" and not getattr(ev, "dry_run", False):
                     rumps.notification("claude-swap", "Auto-switched account", ev.human())
@@ -764,6 +812,13 @@ def run(switcher) -> int:
                     # engine emits it once per run; dropping it would leave a
                     # menu-bar user with a silently inert filter.
                     rumps.notification("claude-swap", "Configuration warning", ev.human())
+
+        def _auto_enabled(self) -> bool:
+            """Whether auto-switching is on, from core settings (for the menu)."""
+            try:
+                return load_settings(self.switcher.backup_dir).enabled
+            except Exception:
+                return False
 
         def _threshold(self) -> int:
             """Current auto-switch threshold from core settings (for the menu)."""
@@ -785,6 +840,7 @@ def run(switcher) -> int:
 
         def rebuild_menu(self):
             self._retitle()
+            self._refresh_owner()
             # Stop a rumps memory leak: rumps registers each menu item's callback
             # in the process-global NSApp._ns_to_py_and_callback, but Menu.clear()
             # never removes them, so rebuilding the whole menu on every refresh
@@ -921,8 +977,12 @@ def run(switcher) -> int:
             menu.add(interval)
 
             auto_item = rumps.MenuItem("Auto-switch accounts", callback=self.on_toggle_autoswitch)
-            auto_item.state = 1 if self.settings.auto_switch_enabled else 0
+            auto_item.state = 1 if self._auto_enabled() else 0
             menu.add(auto_item)
+            # Which process is actually ticking. Inert (callback=None): it is
+            # a statement of fact, not a control, and the check mark above
+            # says only what the policy file says — not who is applying it.
+            menu.add(rumps.MenuItem(engine_owner_label(*self._owner), callback=None))
 
             threshold_menu = rumps.MenuItem("Auto-switch threshold")
             current = self._threshold()
@@ -1089,9 +1149,19 @@ def run(switcher) -> int:
             return cb
 
         def on_toggle_autoswitch(self, _sender):
-            self.settings.auto_switch_enabled = not self.settings.auto_switch_enabled
-            self.settings.save(settings_path)
-            if self.settings.auto_switch_enabled:
+            # Persist first: the engine started below reads the file, and the
+            # backend service (if it owns the engine) only ever sees the file.
+            enabled = not self._auto_enabled()
+            try:
+                set_setting(
+                    self.switcher.backup_dir,
+                    "autoswitch.enabled",
+                    "true" if enabled else "false",
+                )
+            except Exception as e:
+                rumps.alert(title="claude-swap", message=f"Couldn't set auto-switch: {e}")
+                return
+            if enabled:
                 self._start_engine()
             else:
                 self._stop_engine()

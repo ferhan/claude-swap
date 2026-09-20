@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 from claude_swap import __version__, paths, printer
 from claude_swap.exceptions import ClaudeSwitchError
@@ -400,6 +401,48 @@ def _unclaimed_command(argv: list[str]) -> None:
         sys.exit(130)
 
 
+def _snapshot_command(argv: list[str]) -> None:
+    """Handle `cswap snapshot [--out PATH]` — the display state as one JSON doc.
+
+    Pre-dispatched before the main parser for the same reason as `unclaimed`
+    (the main parser's mutually-exclusive flag group can't hold a positional
+    subcommand), and because stdout here is always machine-readable — errors
+    go out as the same structured envelope `--json` uses, never a red line.
+    """
+    parser = argparse.ArgumentParser(
+        prog=f"{_prog_name()} snapshot",
+        description=(
+            "Print the full display state (accounts, usage, pace, "
+            "switchability) as one JSON document for a GUI shell to render."
+        ),
+    )
+    parser.add_argument(
+        "--out",
+        metavar="PATH",
+        help="Write to PATH (created 0600, published atomically) instead of stdout",
+    )
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args(argv)
+
+    try:
+        switcher = ClaudeAccountSwitcher(debug=args.debug)
+        _guard_root(switcher)
+
+        from claude_swap.snapshot_json import take_snapshot, write_snapshot
+
+        payload = take_snapshot(switcher)
+        if args.out:
+            write_snapshot(Path(args.out), payload)
+        else:
+            print(json.dumps(payload, indent=2))
+    except ClaudeSwitchError as e:
+        print(json.dumps(error_envelope(e), indent=2))
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print(f"\n{dimmed('Operation cancelled')}", file=sys.stderr)
+        sys.exit(130)
+
+
 def _swap_command(argv: list[str]) -> None:
     """Handle `cswap swap NUM|EMAIL|ALIAS NUM|EMAIL|ALIAS`.
 
@@ -608,6 +651,11 @@ Examples:
   cswap auto --json                # one JSON event per line (for scripts)
   cswap auto --once; echo $?       # single tick, outcome in exit code
   cswap auto --dry-run             # log decisions, never actually switch
+  cswap service install            # run the engine as a launchd agent (macOS)
+
+Switching is opt-in: until autoswitch.enabled is true the engine polls,
+evaluates and reports, but never moves the active account. Turn it on with
+`cswap config set autoswitch.enabled true` (or the menu bar's toggle).
 
 Defaults live in settings.json in the backup root; flags override them.
         """,
@@ -678,11 +726,51 @@ Defaults live in settings.json in the backup root; flags override them.
         help="Evaluate and report, but never switch or write state",
     )
     parser.add_argument(
+        "--snapshot-out",
+        metavar="PATH",
+        help=(
+            "Write the display snapshot here each tick (default: "
+            "snapshot.json in the backup root, which GUI shells read)"
+        ),
+    )
+    parser.add_argument(
+        "--no-snapshot",
+        action="store_true",
+        help="Don't publish the display snapshot at all",
+    )
+    # The three service flags moved to `cswap service`; kept here as
+    # deprecated aliases (see ``_auto_service``) and hidden from help so the
+    # new spelling is the only one anybody learns.
+    parser.add_argument(
+        "--install-service",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--uninstall-service",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--service-status",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug logging",
     )
     args = parser.parse_args(argv)
+
+    if args.install_service or args.uninstall_service or args.service_status:
+        # Before the switcher: installing a service must not need the
+        # Keychain, and the answer doesn't depend on any account state.
+        try:
+            sys.exit(_auto_service(args))
+        except ClaudeSwitchError as e:
+            error(f"Error: {e}")
+            sys.exit(1)
 
     from claude_swap.autoswitch import AutoSwitchEngine, AutoSwitchEvent
     from claude_swap.printer import accent, yellowed
@@ -710,11 +798,19 @@ Defaults live in settings.json in the backup root; flags override them.
                 sys.exit(1)
 
         settings = merged_with_cli(load_settings(switcher.backup_dir), args)
+        from claude_swap.snapshot_json import default_snapshot_path
+
+        snapshot_path = None
+        if not args.no_snapshot:
+            snapshot_path = (
+                Path(args.snapshot_out) if args.snapshot_out else default_snapshot_path()
+            )
         engine = AutoSwitchEngine(
             switcher,
             settings,
             jsonl_emit if args.json else human_emit,
             dry_run=args.dry_run,
+            snapshot_path=snapshot_path,
         )
 
         if args.once:
@@ -727,7 +823,11 @@ Defaults live in settings.json in the backup root; flags override them.
                 dimmed(
                     f"Auto-switch running: threshold {settings.threshold:.0f}%, "
                     f"every {settings.interval_seconds:.0f}s"
-                    f"{' (dry-run)' if args.dry_run else ''} — Ctrl-C to stop"
+                    f"{' (dry-run)' if args.dry_run else ''}"
+                    # A loop that reports switches it will never make is the
+                    # kind of silence that costs an hour; name the setting.
+                    f"{'' if settings.enabled else ' (poll-only: autoswitch.enabled is false)'}"
+                    " — Ctrl-C to stop"
                 )
             )
         sys.exit(engine.run_loop())
@@ -934,8 +1034,9 @@ def _menubar_service(args) -> int:
         unsupported = framework_build_warning()
         result = launch_agent.install()
         print(f"Menu bar service installed ({result['label']}).")
-        print(f"  plist: {result['plist']}")
-        print(f"  logs:  {result['stderr_log']}")
+        print(f"  plist:   {result['plist']}")
+        print(f"  program: {' '.join(result['program'])}")
+        print(f"  logs:    {result['stderr_log']}")
         print(
             dimmed(
                 "It starts at login from now on. Re-run this after a cswap "
@@ -967,10 +1068,235 @@ def _menubar_service(args) -> int:
     state = result["state"] or ("loaded" if result["loaded"] else "stopped")
     pid = f" (pid {result['pid']})" if result["pid"] else ""
     print(f"Menu bar service: {state}{pid}")
-    print(f"  plist: {result['plist']}")
+    print(f"  plist:   {result['plist']}")
+    if result["program"]:
+        print(f"  program: {' '.join(result['program'])}")
     if not result["installed"]:
         print(dimmed("launchd still has it loaded, but the plist is gone."))
     return 0
+
+
+def _service_command(argv: list[str]) -> None:
+    """Handle `cswap service [install|uninstall|status|logs]`.
+
+    Pre-dispatched before the main parser is built, like `run`, `auto` and
+    `config` (same limitation: `service` must be the first argument). The
+    backend is one headless process owning the auto-switch engine; the menu
+    bar, the TUI and the widget read what it writes. `cswap auto` stays the
+    foreground / --once engine for cron and debugging — it is no longer the
+    thing you install.
+    """
+    parser = argparse.ArgumentParser(
+        prog="cswap service",
+        description=(
+            "Manage the backend LaunchAgent: one headless process that polls, "
+            "maintains the store, publishes the snapshot and applies the "
+            "auto-switch policy (macOS)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  cswap service install       # start now, and at every login
+  cswap service status        # running? which build? who holds the engine?
+  cswap service logs -f       # follow the event stream
+  cswap service uninstall     # stop it and remove the plist
+
+Installing the backend is not the same as opting into automatic switching:
+until autoswitch.enabled is true it polls, evaluates and reports only. Turn
+it on with `cswap config set autoswitch.enabled true`.
+        """,
+    )
+    sub = parser.add_subparsers(
+        dest="action", metavar="{install,uninstall,status,logs}"
+    )
+    sub.add_parser("install", help="Install and start the backend LaunchAgent")
+    sub.add_parser("uninstall", help="Stop the backend and remove its plist")
+    sub.add_parser("status", help="Is it running, and which build is launchd holding")
+    p_logs = sub.add_parser("logs", help="Tail the backend's event stream")
+    p_logs.add_argument(
+        "-n",
+        type=int,
+        default=50,
+        metavar="LINES",
+        dest="lines",
+        help="How many trailing lines to show (default 50)",
+    )
+    p_logs.add_argument(
+        "-f",
+        "--follow",
+        action="store_true",
+        help="Keep printing new lines as they arrive (Ctrl-C to stop)",
+    )
+    args = parser.parse_args(argv)
+    action = args.action or "status"
+
+    try:
+        if action == "install":
+            sys.exit(_service_install())
+        if action == "uninstall":
+            sys.exit(_service_uninstall())
+        if action == "logs":
+            sys.exit(_service_logs(args.lines, args.follow))
+        sys.exit(_service_status())
+    except ClaudeSwitchError as e:
+        error(f"Error: {e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print(f"\n{dimmed('Stopped')}")
+        sys.exit(130)
+
+
+def _service_install() -> int:
+    from claude_swap import launch_agent
+    from claude_swap.settings import load_settings
+
+    # --json: the stdout log is the event stream the TUI and the menu bar
+    # read (see autoswitch.BackendEventLog), so it has to be parseable. The
+    # payload carries the rendered line too, which is what `service logs`
+    # prints back — nothing human is lost by making it machine-readable.
+    result = launch_agent.install(
+        label=launch_agent.AUTO_LABEL, args=("auto", "--json")
+    )
+    print(f"Backend service installed ({result['label']}).")
+    print(f"  plist:   {result['plist']}")
+    print(f"  program: {' '.join(result['program'])}")
+    print(f"  logs:    {result['stderr_log']}")
+    print(
+        dimmed(
+            "It starts at login from now on. Re-run this after a cswap "
+            "upgrade to point launchd at the new build."
+        )
+    )
+    if not load_settings(paths.get_backup_root()).enabled:
+        # Installing the service is not the opt-in to switching; say so
+        # now rather than leaving someone waiting for a switch that the
+        # engine was never going to make.
+        print(
+            dimmed(
+                "Switching is off: it polls and reports only, until "
+                "'cswap config set autoswitch.enabled true'."
+            )
+        )
+    return 0
+
+
+def _service_uninstall() -> int:
+    from claude_swap import launch_agent
+
+    result = launch_agent.uninstall(label=launch_agent.AUTO_LABEL)
+    if result["was_loaded"] or result["removed_plist"]:
+        print("Backend service removed.")
+    else:
+        print("Backend service was not installed.")
+    return 0
+
+
+def _service_status() -> int:
+    from claude_swap import launch_agent
+
+    result = launch_agent.status(label=launch_agent.AUTO_LABEL)
+    if not result["installed"] and not result["loaded"]:
+        print("Backend service is not installed.")
+        print(dimmed("Install it with: cswap service install"))
+    else:
+        state = result["state"] or ("loaded" if result["loaded"] else "stopped")
+        pid = f" (pid {result['pid']})" if result["pid"] else ""
+        print(f"Backend service: {state}{pid}")
+        print(f"  plist:   {result['plist']}")
+        if result["program"]:
+            print(f"  program: {' '.join(result['program'])}")
+        if not result["installed"]:
+            print(dimmed("launchd still has it loaded, but the plist is gone."))
+    # Reported whether or not the service is installed: the engine lock is
+    # the machine-wide answer to "is something ticking", and a hand-run
+    # `cswap auto` or a menu bar holds it just as a LaunchAgent does.
+    print(f"  engine:  {_engine_lock_line()}")
+    return 0
+
+
+def _engine_lock_line() -> str:
+    """Who holds the singleton engine lock, rendered for `service status`."""
+    from claude_swap.locking import (
+        describe_engine_holder,
+        engine_lock_holder,
+        engine_lock_path,
+    )
+
+    lock = engine_lock_path(paths.get_backup_root())
+    # No lock file means no engine has ever run here, and probing would
+    # create one (FileLock opens "w") just to prove it — status stays a read.
+    holder = engine_lock_holder(lock) if lock.exists() else None
+    if holder is None:
+        return dimmed("not held — no engine is ticking")
+    return f"held by {describe_engine_holder(holder)}"
+
+
+def _service_logs(lines: int, follow: bool) -> int:
+    """Tail the backend's stdout, where the engine prints one event per tick."""
+    import time as _time
+    from collections import deque
+
+    from claude_swap import launch_agent
+
+    out_log, err_log = launch_agent.log_paths(launch_agent.AUTO_LABEL)
+    if not out_log.exists():
+        print(f"No backend log at {out_log}.")
+        print(dimmed("Install the service first: cswap service install"))
+        return 1
+    print(dimmed(f"{out_log}  (crashes land in {err_log})"))
+    with out_log.open("r", encoding="utf-8", errors="replace") as fh:
+        # Whole-file read to find the last N lines: the engine writes one
+        # short line per tick, so this file is small, and a seek-backwards
+        # tail is more machinery than the problem deserves.
+        for line in deque(fh, maxlen=max(lines, 0)):
+            print(_render_log_line(line), end="", flush=True)
+        while follow:  # Ctrl-C ends it (KeyboardInterrupt, handled above)
+            line = fh.readline()
+            if line:
+                print(_render_log_line(line), end="", flush=True)
+            else:
+                _time.sleep(1.0)
+    return 0
+
+
+def _render_log_line(line: str) -> str:
+    """Print one backend log line the way `cswap auto` would have printed it.
+
+    The backend logs JSONL so surfaces can read it; a person reading `service
+    logs` wants the rendered line the payload carries. Anything that isn't an
+    event — a backend installed before it emitted JSON, a traceback — passes
+    through untouched.
+    """
+    from claude_swap.autoswitch import parse_event_line
+
+    event = parse_event_line(line)
+    if event is None:
+        return line
+    stamp = event.ts[11:19] or event.ts  # "2026-09-20T14:03:11Z" -> "14:03:11"
+    return f"{stamp}  {event.human()}\n"
+
+
+def _auto_service(args) -> int:
+    """Deprecated ``auto --install-service|--uninstall-service|--service-status``.
+
+    These moved to ``cswap service``: the backend is a service, not a policy.
+    Kept working (with a pointer on stderr) rather than removed, because the
+    old spelling is in the scripts, aliases and shell history of everyone
+    running the published package — an argparse "unrecognized argument" is a
+    worse answer than doing the job and saying where it lives now.
+    """
+    flag, verb, action = (
+        ("--install-service", "install", _service_install)
+        if args.install_service
+        else ("--uninstall-service", "uninstall", _service_uninstall)
+        if args.uninstall_service
+        else ("--service-status", "status", _service_status)
+    )
+    warning(
+        f"'cswap auto {flag}' is deprecated; use 'cswap service {verb}'",
+        file=sys.stderr,
+    )
+    return action()
 
 
 def main() -> None:
@@ -999,6 +1325,9 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "config":
         _config_command(sys.argv[2:])
         return
+    if argv and argv[0] == "service":
+        _service_command(argv[1:])
+        return
     if argv and argv[0] == "map":
         _map_command(argv[1:])
         return
@@ -1007,6 +1336,9 @@ def main() -> None:
         return
     if argv and argv[0] == "unclaimed":
         _unclaimed_command(argv[1:])
+        return
+    if argv and argv[0] == "snapshot":
+        _snapshot_command(argv[1:])
         return
     if argv and argv[0] == "alias":
         _alias_command(argv[1:])
@@ -1058,12 +1390,15 @@ Commands:
   %(prog)s auto                       auto-switch when nearing rate limits
   %(prog)s config [set KEY VALUE]     show or change settings (settings.json)
   %(prog)s unclaimed [--purge ID]     list or drop stashed credential entries
+  %(prog)s snapshot [--out PATH]      full display state as JSON (for GUI shells)
   %(prog)s export <path>              export accounts
   %(prog)s import <path>              import accounts
   %(prog)s tui                        interactive dashboard (also: bare %(prog)s)
   %(prog)s watch                      dashboard, opened on the live watch page
   %(prog)s menubar                    macOS menu bar app
   %(prog)s menubar --install-service  keep the menu bar running via launchd
+  %(prog)s service install            run the backend engine via launchd
+  %(prog)s service status             is the backend running, and which build
   %(prog)s upgrade                    self-upgrade to latest
   %(prog)s purge                      remove all claude-swap data
 
@@ -1075,6 +1410,7 @@ Aliases: ls=list  rm=remove  update=upgrade""",
   %(prog)s switch user@example.com
   %(prog)s list --token-status
   %(prog)s list --json
+  %(prog)s snapshot --out ~/snapshot.json    # one-shot state for a widget
   %(prog)s add --slot 3                      # add to a specific slot
   %(prog)s add-token sk-ant-oat01-... --email me@example.com
   %(prog)s run 2 -- --resume                 # forward args after '--' to claude

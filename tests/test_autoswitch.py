@@ -30,10 +30,14 @@ from claude_swap.autoswitch import (
     _recovery_is_useful,
     pct_label,
 )
-from claude_swap.json_output import USAGE_FOREIGN_CREDENTIAL, USAGE_TOKEN_EXPIRED
+from claude_swap.json_output import (
+    SCHEMA_VERSION,
+    USAGE_FOREIGN_CREDENTIAL,
+    USAGE_TOKEN_EXPIRED,
+)
 from claude_swap.usage_store import FetchRecord, UsageEntry
 from claude_swap.models import Platform
-from claude_swap.settings import AutoSwitchSettings
+from claude_swap.settings import AutoSwitchSettings, set_setting
 from claude_swap.switcher import ClaudeAccountSwitcher
 
 
@@ -102,6 +106,9 @@ class EngineHarness:
             self.switcher.platform = Platform.LINUX
             self.switcher._setup_directories()
             self.switcher._init_sequence_file()
+        # These exercise a SWITCHING engine, and autoswitch.enabled defaults
+        # off (poll-only), so turn it on unless a test asks for otherwise.
+        settings_kwargs.setdefault("enabled", True)
         self.settings = AutoSwitchSettings(**settings_kwargs)
         self.events: list = []
         self.clock = FakeClock()
@@ -118,6 +125,16 @@ class EngineHarness:
             clock=self.clock,
             **kwargs,
         )
+
+    def hand_off_engine_lock(self) -> None:
+        """Release this harness engine's singleton lock.
+
+        Only one engine per backup root may tick. A test that stands a second
+        engine up over the same state is modelling a second *process*, so it
+        hands the lock over the way process death would.
+        """
+        if self.engine._engine_lock is not None:
+            self.engine._engine_lock.release()
 
     def seed(self, num: int, email: str, *, expires_at: int | None = None) -> None:
         oauth_blob: dict = {
@@ -1994,6 +2011,184 @@ class TestDryRunAndNoOp:
         assert "lastSwitchAt" not in harness.state()
 
 
+class TestEnabledIsReadFromDiskEachTick:
+    """``autoswitch.enabled`` is how one surface reaches a running engine.
+
+    There is no IPC between the backend service, the menu bar and the CLI —
+    they meet in settings.json — so the engine re-reads the file each tick
+    instead of keeping whatever it was constructed with. ``EngineHarness``
+    pins switching ON over the file (a pinned field is exactly what a
+    ``cswap auto --threshold`` flag is), so these build an engine with
+    nothing pinned, which therefore follows the file.
+    """
+
+    def _following_the_file(self, temp_home: Path, *, enabled: bool) -> EngineHarness:
+        h = EngineHarness(temp_home)
+        h.seed(1, "a@example.com")
+        h.seed(2, "b@example.com")
+        h.make_live("a@example.com", 1)
+        set_setting(
+            h.switcher.backup_dir,
+            "autoswitch.enabled",
+            "true" if enabled else "false",
+        )
+        h.settings = replace(h.settings, enabled=enabled)
+        h.engine = h._make_engine()
+        assert h.engine._pinned == {}
+        return h
+
+    def test_off_evaluates_and_reports_but_never_switches(self, temp_home):
+        h = self._following_the_file(temp_home, enabled=False)
+        live_before = (temp_home / ".claude" / ".credentials.json").read_text()
+
+        outcome = h.tick_with_usage({"1": _usage(95), "2": _usage(10)})
+
+        assert outcome is TickOutcome.SWITCHED  # reported the would-switch
+        assert any(isinstance(e, PollEvent) for e in h.events)  # still polled
+        switch = next(e for e in h.events if isinstance(e, SwitchEvent))
+        assert switch.dry_run is True
+        assert h.active_number() == 1
+        assert (temp_home / ".claude" / ".credentials.json").read_text() == live_before
+        assert "lastSwitchAt" not in h.state()
+
+    def test_off_never_freshens_the_target_it_would_have_taken(self, temp_home):
+        # Freshening rotates a real token. Nothing is going to be activated,
+        # so a poll-only engine must not touch the candidate's credential.
+        h = self._following_the_file(temp_home, enabled=False)
+        h.seed(2, "b@example.com", expires_at=1)  # long expired
+        backup_before = h.switcher.read_account_credentials("2", "b@example.com")
+
+        with patch(
+            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials"
+        ) as mock_refresh:
+            h.tick_with_usage({"1": _usage(95), "2": _usage(10)})
+
+        mock_refresh.assert_not_called()
+        assert h.switcher.read_account_credentials("2", "b@example.com") == backup_before
+
+    def test_off_still_releases_a_recovered_quarantine(self, temp_home):
+        """The one place poll-only and ``--dry-run`` part company.
+
+        Dry-run writes nothing at all — it is a preview of somebody else's
+        run. A poll-only backend is still the process maintaining this
+        machine's state, and a stale quarantine entry keeps a re-added
+        account out of the polling plan, so this release has to land even
+        though no switch ever will.
+        """
+        h = self._following_the_file(temp_home, enabled=False)
+        h.engine._quarantine("2", "b@example.com", "invalid_grant")
+        h.switcher._write_account_credentials(
+            "2", "b@example.com",
+            json.dumps({"claudeAiOauth": {"accessToken": "n", "refreshToken": "n"}}),
+        )
+        h.events.clear()
+
+        h.tick_with_usage({"1": _usage(95), "2": _usage(10)})
+
+        assert any(isinstance(e, UnquarantineEvent) for e in h.events)
+        assert "2" not in (h.state().get("quarantine") or {})
+
+    def test_turning_it_on_reaches_an_engine_that_is_already_running(self, temp_home):
+        h = self._following_the_file(temp_home, enabled=False)
+        usage = {"1": _usage(95), "2": _usage(10)}
+        h.tick_with_usage(usage)
+        assert h.active_number() == 1  # off: reported only
+
+        set_setting(h.switcher.backup_dir, "autoswitch.enabled", "true")
+
+        assert h.tick_with_usage(usage) is TickOutcome.SWITCHED
+        assert h.active_number() == 2  # same engine object, no restart
+
+    def test_turning_it_off_reaches_an_engine_that_is_already_running(self, temp_home):
+        h = self._following_the_file(temp_home, enabled=True)
+        usage = {"1": _usage(95), "2": _usage(10)}
+
+        set_setting(h.switcher.backup_dir, "autoswitch.enabled", "false")
+
+        h.tick_with_usage(usage)
+        assert h.active_number() == 1
+
+    def test_a_flag_this_process_was_given_survives_the_re_read(self, temp_home):
+        # `cswap auto --threshold 60` must not evaporate on the first tick,
+        # and the TUI's session threshold is the same pin.
+        h = EngineHarness(temp_home, threshold=60.0)
+        h.seed(1, "a@example.com")
+        h.make_live("a@example.com", 1)
+        set_setting(h.switcher.backup_dir, "autoswitch.threshold", "95")
+
+        h.tick_with_usage({"1": _usage(10)})
+        assert h.engine.settings.threshold == 60.0
+
+        h.engine.apply_threshold(70.0)
+        h.tick_with_usage({"1": _usage(10)})
+        assert h.engine.settings.threshold == 70.0
+
+
+class TestSnapshotPublishing:
+    """The engine publishes the display projection every tick.
+
+    A separately-distributed widget reads that one file (see
+    ``snapshot_json.default_snapshot_path``) and has no other way in, so it
+    is refreshed on every tick — and a write that fails must never be able
+    to end the loop that feeds it.
+    """
+
+    def _harness(self, temp_home: Path, **kwargs) -> EngineHarness:
+        h = EngineHarness(temp_home)
+        h.seed(1, "a@example.com")
+        h.make_live("a@example.com", 1)
+        h.engine = h._make_engine(**kwargs)
+        return h
+
+    def test_each_tick_publishes_the_snapshot(self, temp_home):
+        out = temp_home / "snap.json"
+        h = self._harness(temp_home, snapshot_path=out)
+
+        h.tick_with_usage({"1": _usage(10)})
+
+        payload = json.loads(out.read_text())
+        assert payload["schemaVersion"] == SCHEMA_VERSION
+        assert [a["email"] for a in payload["accounts"]] == ["a@example.com"]
+
+        out.unlink()  # every tick, not once at startup
+        h.tick_with_usage({"1": _usage(10)})
+        assert out.exists()
+
+    def test_no_path_publishes_nothing(self, temp_home):
+        # The TUI and the menu bar render in-process; neither wants a file.
+        h = self._harness(temp_home)
+        h.tick_with_usage({"1": _usage(10)})
+        assert not (temp_home / "snap.json").exists()
+
+    def test_a_failing_write_leaves_the_tick_alone(self, temp_home):
+        h = self._harness(temp_home, snapshot_path=temp_home / "snap.json")
+
+        with patch(
+            "claude_swap.autoswitch.write_snapshot", side_effect=OSError("no space")
+        ):
+            outcome = h.tick_with_usage({"1": _usage(10)})
+
+        assert outcome is TickOutcome.NO_ACTION
+        assert not any(isinstance(e, ErrorEvent) for e in h.events)
+
+    def test_a_failing_write_does_not_end_the_loop(self, temp_home):
+        h = self._harness(temp_home, snapshot_path=temp_home / "snap.json")
+        ticks = []
+
+        def fake_inner():
+            ticks.append(1)
+            if len(ticks) >= 2:
+                h.engine.stop()
+            return TickOutcome.NO_ACTION
+
+        with patch.object(h.engine, "_tick_inner", side_effect=fake_inner), patch(
+            "claude_swap.autoswitch.write_snapshot", side_effect=OSError("no space")
+        ), patch.object(h.engine._wake, "wait", return_value=None):
+            assert h.engine.run_loop() == 0
+
+        assert len(ticks) == 2
+
+
 class TestEventsShape:
     def test_every_event_has_envelope(self, harness):
         harness.tick_with_usage({"1": _usage(95), "2": _usage(10), "3": _usage(50)})
@@ -2046,6 +2241,7 @@ class TestEventsShape:
         assert "Fable" not in poll.human()
         assert poll.to_json()["windowsPct"]["2"] == {"5h": 3.0, "7d": 89.0}
 
+        plain.hand_off_engine_lock()  # same backup root, one engine at a time
         modeled = build(model="Fable")
         modeled.tick_with_usage(usage)
         poll = next(e for e in modeled.events if isinstance(e, PollEvent))
@@ -2902,6 +3098,10 @@ class TestConsumeFirstStrategy:
         })
         assert h.active_number() == 2
         h.events.clear()
+        # The singleton engine lock would refuse this second engine outright;
+        # hand it over, because the case under test is the one the lock cannot
+        # cover — an engine from a build that predates it.
+        h.hand_off_engine_lock()
         # Loser's first (pre-lock) state read predates the winner's write; its
         # usage view ranks #3 soonest, so it reaches _perform for a different
         # target and only the locked recheck can stop it.
@@ -6894,3 +7094,198 @@ class TestFreshenRoutesThroughGate:
         assert gate_calls["args"][0] == "2"
         assert "called" not in direct, "freshen must not POST outside the gate"
 
+
+
+class TestSingletonEngineLock:
+    """Exactly one engine may tick against one backup root.
+
+    The launchd label check (`backend_is_loaded`) catches only a registered
+    backend; this lock also catches a hand-run `cswap auto`, a menu bar and a
+    TUI. It does not catch a build that predates it — that gap is by design
+    and stated in `locking.EngineLock`.
+    """
+
+    def _lock_path(self, harness) -> Path:
+        from claude_swap.locking import engine_lock_path
+
+        return engine_lock_path(harness.switcher.backup_dir)
+
+    def test_ticking_takes_the_lock(self, harness):
+        from claude_swap.locking import engine_lock_holder
+
+        path = self._lock_path(harness)
+        assert engine_lock_holder(path) is None
+        # A single tick is the `cswap auto --once` path: it must take the
+        # lock too, or a cron one-shot races the backend.
+        harness.tick_with_usage({"1": _usage(10), "2": _usage(10)})
+        holder = engine_lock_holder(path)
+        assert holder is not None and holder["pid"] == os.getpid()
+
+    def test_a_second_engine_refuses_to_tick(self, harness):
+        harness.tick_with_usage({"1": _usage(95), "2": _usage(1)})
+        harness.events.clear()
+        second = harness._make_engine()
+        outcome = second.tick()
+        assert outcome is TickOutcome.ERROR
+        assert harness.kinds() == ["error"]
+        message = harness.events[0].message
+        assert "another cswap engine" in message
+        assert str(os.getpid()) in message  # names the holder
+
+    def test_a_refused_engine_polls_nothing_and_publishes_nothing(
+        self, harness, tmp_path
+    ):
+        harness.tick_with_usage({"1": _usage(95), "2": _usage(1)})
+        snapshot = tmp_path / "snapshot.json"
+        second = harness._make_engine(snapshot_path=snapshot)
+        with patch.object(
+            harness.switcher, "usage_entries_by_account"
+        ) as entries:
+            assert second.tick() is TickOutcome.ERROR
+        entries.assert_not_called()
+        # The holder owns the snapshot; a refused engine must not overwrite it.
+        assert not snapshot.exists()
+
+    def test_run_loop_declines_instead_of_killing_its_host(self, harness):
+        """A surface hosting the engine in a thread gets no engine, not a
+        crash: run_loop returns non-zero and never ticks."""
+        from claude_swap.locking import EngineLock
+
+        holder = EngineLock(self._lock_path(harness))
+        assert holder.acquire() is True
+        try:
+            engine = harness._make_engine()
+            with patch.object(engine, "_tick_inner") as inner:
+                assert engine.run_loop() == 1
+            inner.assert_not_called()
+        finally:
+            holder.release()
+        assert [e.kind for e in harness.events] == ["error"]
+
+    def test_run_loop_releases_the_lock_when_it_exits(self, harness):
+        from claude_swap.locking import engine_lock_holder
+
+        harness.engine.stop()  # loop exits at the top, before any tick
+        assert harness.engine.run_loop() == 0
+        assert engine_lock_holder(self._lock_path(harness)) is None
+
+
+class TestBackendEventStream:
+    """Reading an engine's events out of the JSONL another process wrote.
+
+    This is the surfaces' half of "the backend is not a broker": nothing is
+    pushed to them, they read the stream the backend was already writing.
+    """
+
+    def test_every_event_carries_its_rendered_line(self, harness):
+        from claude_swap.autoswitch import parse_event_line
+
+        harness.tick_with_usage({"1": _usage(95), "2": _usage(10), "3": _usage(50)})
+        assert harness.events
+        for event in harness.events:
+            replayed = parse_event_line(json.dumps(event.to_json()))
+            assert replayed is not None
+            assert replayed.kind == event.kind
+            assert replayed.human() == event.human()
+
+    def test_a_dry_run_switch_stays_a_dry_run_across_the_stream(self):
+        from claude_swap.autoswitch import SwitchEvent, parse_event_line
+
+        event = SwitchEvent(
+            trigger="proactive", from_ref=None, to_ref=None, dry_run=True
+        )
+        replayed = parse_event_line(json.dumps(event.to_json()))
+        assert replayed.dry_run is True
+        # The menu bar notifies only on a real switch; losing this flag would
+        # announce switches that never happened.
+        assert parse_event_line(json.dumps(SwitchEvent(
+            trigger="proactive", from_ref=None, to_ref=None
+        ).to_json())).dry_run is False
+
+    @pytest.mark.parametrize(
+        "line",
+        ["", "\n", "14:03:11  Account-1: 42% used", "{ truncated", "{}", "[1, 2]"],
+    )
+    def test_anything_that_is_not_an_event_is_skipped(self, line):
+        from claude_swap.autoswitch import parse_event_line
+
+        assert parse_event_line(line) is None
+
+    def _log(self, path, *events):
+        with path.open("a", encoding="utf-8") as fh:
+            for event in events:
+                fh.write(json.dumps(event.to_json()) + "\n")
+
+    def _error(self, message):
+        from claude_swap.autoswitch import ErrorEvent
+
+        return ErrorEvent(message=message)
+
+    def test_first_poll_backfills_the_tail_then_follows(self, tmp_path):
+        from claude_swap.autoswitch import BackendEventLog
+
+        log = tmp_path / "com.cswap.auto.log"
+        self._log(log, *(self._error(f"e{i}") for i in range(10)))
+        reader = BackendEventLog(log, backfill=3)
+        assert [e.human() for e in reader.poll()] == [
+            "error: e7 (will retry)",
+            "error: e8 (will retry)",
+            "error: e9 (will retry)",
+        ]
+        assert reader.poll() == []  # nothing appended since
+        self._log(log, self._error("fresh"))
+        assert [e.human() for e in reader.poll()] == ["error: fresh (will retry)"]
+
+    def test_backfill_zero_starts_silent(self, tmp_path):
+        """What the menu bar wants: replaying yesterday's switches as macOS
+        notifications would be worse than showing nothing."""
+        from claude_swap.autoswitch import BackendEventLog
+
+        log = tmp_path / "com.cswap.auto.log"
+        self._log(log, self._error("old"))
+        reader = BackendEventLog(log, backfill=0)
+        assert reader.poll() == []
+        self._log(log, self._error("new"))
+        assert [e.human() for e in reader.poll()] == ["error: new (will retry)"]
+
+    def test_a_half_written_line_is_left_for_the_next_poll(self, tmp_path):
+        from claude_swap.autoswitch import BackendEventLog
+
+        log = tmp_path / "com.cswap.auto.log"
+        log.write_text("", encoding="utf-8")
+        reader = BackendEventLog(log)
+        assert reader.poll() == []
+        payload = json.dumps(self._error("torn").to_json())
+        with log.open("a", encoding="utf-8") as fh:
+            fh.write(payload[:20])  # the writer is mid-line
+        assert reader.poll() == []
+        with log.open("a", encoding="utf-8") as fh:
+            fh.write(payload[20:] + "\n")
+        assert [e.human() for e in reader.poll()] == ["error: torn (will retry)"]
+
+    def test_a_truncated_log_restarts_from_the_beginning(self, tmp_path):
+        from claude_swap.autoswitch import BackendEventLog
+
+        log = tmp_path / "com.cswap.auto.log"
+        self._log(log, self._error("before"))
+        reader = BackendEventLog(log, backfill=0)
+        assert reader.poll() == []
+        log.write_text("", encoding="utf-8")  # rotated out from under us
+        self._log(log, self._error("after"))
+        assert [e.human() for e in reader.poll()] == ["error: after (will retry)"]
+
+    def test_a_missing_log_is_not_an_error(self, tmp_path):
+        from claude_swap.autoswitch import BackendEventLog
+
+        reader = BackendEventLog(tmp_path / "never-installed.log")
+        assert reader.poll() == []
+        self._log(tmp_path / "never-installed.log", self._error("later"))
+        assert [e.human() for e in reader.poll()] == ["error: later (will retry)"]
+
+    def test_human_lines_from_a_pre_json_backend_are_ignored_not_fatal(self, tmp_path):
+        from claude_swap.autoswitch import BackendEventLog
+
+        log = tmp_path / "com.cswap.auto.log"
+        log.write_text("14:03:11  Account-1: 42% used\nTraceback…\n", encoding="utf-8")
+        reader = BackendEventLog(log, backfill=5)
+        assert reader.poll() == []

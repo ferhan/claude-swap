@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import multiprocessing
+import os
 import time
 from pathlib import Path
 
 import pytest
 
 from claude_swap.exceptions import LockError
-from claude_swap.locking import FileLock
+from claude_swap.locking import (
+    EngineLock,
+    FileLock,
+    describe_engine_holder,
+    engine_lock_holder,
+    engine_lock_path,
+)
 
 
 class TestFileLock:
@@ -160,3 +167,71 @@ class TestFileLockConcurrency:
 
         assert result is True
         lock.release()
+
+
+def _hold_engine_lock_process(lock_path: str, ready_event):
+    """Hold the engine lock forever; the parent kills this process."""
+    lock = EngineLock(Path(lock_path))
+    if lock.acquire():
+        ready_event.set()
+        time.sleep(60.0)
+
+
+class TestEngineLock:
+    """The singleton engine lock: exactly one process may run an engine."""
+
+    def test_second_acquirer_is_refused_and_can_name_the_first(self, tmp_path: Path):
+        path = engine_lock_path(tmp_path)
+        first = EngineLock(path)
+        assert first.acquire() is True
+
+        assert EngineLock(path).acquire() is False
+        holder = engine_lock_holder(path)
+        assert holder is not None
+        assert holder["pid"] == os.getpid()
+        assert "pid" in describe_engine_holder(holder)
+
+        first.release()
+        assert engine_lock_holder(path) is None
+        assert EngineLock(path).acquire() is True
+
+    def test_holder_probe_does_not_disturb_the_holder(self, tmp_path: Path):
+        # engine_lock_holder acquires to test liveness; a failed FileLock
+        # acquire still truncates the file, which is exactly why the owner
+        # identity lives in a sidecar and must survive the probe.
+        path = engine_lock_path(tmp_path)
+        lock = EngineLock(path)
+        lock.acquire()
+        for _ in range(3):
+            assert engine_lock_holder(path)["pid"] == os.getpid()
+        assert EngineLock(path).acquire() is False
+        lock.release()
+
+    def test_lock_is_released_when_the_holder_dies(self, tmp_path: Path):
+        """flock dies with the process — a crashed engine blocks nothing."""
+        path = engine_lock_path(tmp_path)
+        ready = multiprocessing.Event()
+        p = multiprocessing.Process(
+            target=_hold_engine_lock_process, args=(str(path), ready)
+        )
+        p.start()
+        try:
+            assert ready.wait(timeout=10.0)
+            assert engine_lock_holder(path)["pid"] == p.pid
+            assert EngineLock(path).acquire() is False
+        finally:
+            p.kill()  # SIGKILL: no chance to release, no sidecar cleanup
+            p.join(timeout=10.0)
+
+        assert engine_lock_holder(path) is None
+        assert EngineLock(path).acquire() is True
+
+    def test_holder_of_an_unnamed_lock_is_reported_as_held(self, tmp_path: Path):
+        # A build predating the lock is the honest gap, but a plain FileLock
+        # holder (no sidecar) must still read as "held", not "free".
+        path = engine_lock_path(tmp_path)
+        raw = FileLock(path)
+        raw.acquire()
+        assert engine_lock_holder(path) == {}
+        assert describe_engine_holder({}) == "an unidentified process"
+        raw.release()

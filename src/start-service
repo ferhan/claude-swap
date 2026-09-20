@@ -1,0 +1,27 @@
+#!/bin/bash
+# Run a cswap service from this checkout under launchd.
+#
+#   ./start-service            the backend auto-switch engine (default) — it
+#                              owns the engine; the menu bar, TUI and widget
+#                              read what it writes
+#   ./start-service menubar    the menu bar UI
+#
+# Syncs the dev venv, points the LaunchAgent at .venv/bin/cswap, and hands it
+# to launchd. The service comes up and this script exits; launchd owns the
+# process from then on and restarts it at login until ./stop-service.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO"
+
+SERVICE="${1:-auto}"
+case "$SERVICE" in
+    auto|menubar) ;;
+    *) echo "usage: $(basename "$0") [auto|menubar]" >&2; exit 2 ;;
+esac
+
+uv sync --extra menubar
+if [[ "$SERVICE" == "auto" ]]; then
+    exec .venv/bin/cswap service install
+fi
+exec .venv/bin/cswap menubar --install-service

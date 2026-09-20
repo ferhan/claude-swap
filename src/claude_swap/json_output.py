@@ -181,13 +181,14 @@ def usage_freshness_fields(
     ``lastGoodFetchedAt``/``lastGoodAgeSeconds`` for null-``usage`` rows."""
     if fetched_at is None:
         return {}
-    fields: dict = {"usageFetchedAt": _timestamp(fetched_at)}
+    fields: dict = {"usageFetchedAt": iso_timestamp(fetched_at)}
     if age_s is not None:
         fields["usageAgeSeconds"] = round(age_s, 1)
     return fields
 
 
-def _timestamp(epoch_s: float) -> str:
+def iso_timestamp(epoch_s: float) -> str:
+    """A POSIX timestamp as the schema's UTC ``...Z`` string."""
     return (
         datetime.fromtimestamp(epoch_s, tz=timezone.utc)
         .isoformat(timespec="seconds")
@@ -207,7 +208,7 @@ def usage_failure_fields(
         return {}
     out = {"usageError": last_error}
     if backoff_until is not None:
-        out["usageRetryAt"] = _timestamp(backoff_until)
+        out["usageRetryAt"] = iso_timestamp(backoff_until)
     return out
 
 

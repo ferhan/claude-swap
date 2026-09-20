@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from claude_swap import launch_agent
 from claude_swap.autoswitch import NoSwitchEvent, SwitchEvent
 from claude_swap.json_output import USAGE_API_KEY, USAGE_TOKEN_EXPIRED
 from claude_swap.models import AccountSnapshot, AccountsSnapshot
@@ -1350,6 +1351,119 @@ class TestAutoScreen:
 
             assert len(app.screen.query_one("#event-log", RichLog).lines) > 0
 
+    async def test_defers_to_a_running_backend_service(
+        self, tmp_path, fake_engine, monkeypatch
+    ):
+        """Two engines would poll and decide independently about one set of
+        accounts, so when the backend owns one this screen is a viewer."""
+        monkeypatch.setattr(
+            "claude_swap.tui.autoview.launch_agent.engine_owner",
+            lambda _dir: (launch_agent.ENGINE_BACKEND, "pid 4242 (/tmp/cswap auto)"),
+        )
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2)], tmp_path
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await self._open(pilot)
+            from textual.widgets import RichLog
+
+            assert fake_engine.instances == []
+            lines = app.screen.query_one("#event-log", RichLog).lines
+            assert any("backend service" in line.text for line in lines)
+            from textual.widgets import Static
+
+            # Neither LIVE nor DRY-RUN is true of a screen hosting no engine.
+            badge = app.screen.query_one("#mode-badge", Static)
+            assert "BACKEND" in badge.render().plain
+
+    async def test_hosts_its_own_engine_when_nothing_else_holds_the_lock(
+        self, tmp_path, fake_engine
+    ):
+        """No backend, no hand-run engine: the screen works exactly as before.
+        This must not become "requires the service"."""
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2)], tmp_path
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await self._open(pilot)
+            from textual.widgets import Static
+
+            # Real engine_owner against a backup dir no engine has touched.
+            assert app.screen._owner == launch_agent.ENGINE_SELF
+            assert len(fake_engine.instances) == 1
+            badge = app.screen.query_one("#mode-badge", Static)
+            assert "DRY-RUN" in badge.render().plain
+
+    async def test_a_foreign_engine_is_neither_ours_nor_the_backends(
+        self, tmp_path, fake_engine, monkeypatch
+    ):
+        """The bug this replaces: a hand-run `cswap auto` held the lock, the
+        screen wrote "engine started: DRY-RUN", the engine was then refused,
+        and the badge kept claiming DRY-RUN."""
+        monkeypatch.setattr(
+            "claude_swap.tui.autoview.launch_agent.engine_owner",
+            lambda _dir: (
+                launch_agent.ENGINE_OTHER,
+                "pid 4242 (/usr/local/bin/cswap auto)",
+            ),
+        )
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2)], tmp_path
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await self._open(pilot)
+            from textual.widgets import RichLog, Static
+
+            assert fake_engine.instances == []
+            badge = app.screen.query_one("#mode-badge", Static)
+            assert "EXTERNAL" in badge.render().plain
+            lines = [
+                line.text
+                for line in app.screen.query_one("#event-log", RichLog).lines
+            ]
+            assert any("pid 4242" in line for line in lines)
+            assert not any("engine started" in line for line in lines)
+
+    async def test_renders_the_backends_event_stream(
+        self, tmp_path, fake_engine, monkeypatch
+    ):
+        """Item 4: a client of the backend, not just a screen that declines."""
+        from claude_swap.autoswitch import SwitchEvent
+
+        log = launch_agent.log_paths(launch_agent.AUTO_LABEL)[0]
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(
+            json.dumps(
+                SwitchEvent(
+                    trigger="proactive",
+                    from_ref={"number": 1, "email": "a@example.com"},
+                    to_ref={"number": 2, "email": "b@example.com"},
+                ).to_json()
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "claude_swap.tui.autoview.launch_agent.engine_owner",
+            lambda _dir: (launch_agent.ENGINE_BACKEND, "pid 4242"),
+        )
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2)], tmp_path
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await self._open(pilot)
+            from textual.widgets import RichLog
+
+            lines = [
+                line.text
+                for line in app.screen.query_one("#event-log", RichLog).lines
+            ]
+            assert any("Switched Account-1 -> Account-2" in line for line in lines)
+
     async def test_go_live_requires_confirmation(self, tmp_path, fake_engine):
         fake = FakeSwitcher(
             [make_account(1, active=True), make_account(2)], tmp_path
@@ -1710,3 +1824,64 @@ class TestThemeWiring:
             assert app._theme_name == "light"
             assert app.theme == "cswap-light"
 
+
+
+class TestStateWatchTick:
+    """The app's 1s state tick: cheap local reads, and only real changes.
+
+    Exercised directly rather than through ``run_test`` — the tick is a plain
+    method, and driving a real 1s Textual interval in a test would only add
+    sleeping.
+    """
+
+    def _app(self, tmp_path):
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        refreshes: list[bool] = []
+        app.request_refresh = lambda **kw: refreshes.append(True)
+        return app, refreshes
+
+    def _write_config(self, email: str, *, mtime: float):
+        import os
+
+        from claude_swap import paths
+
+        path = paths.get_global_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"oauthAccount": {"emailAddress": email}, "tips": time.time()}),
+            encoding="utf-8",
+        )
+        os.utime(path, (mtime, mtime))
+
+    def test_a_switch_made_in_another_terminal_repaints(self, tmp_path):
+        self._write_config("a@example.com", mtime=1000)
+        app, refreshes = self._app(tmp_path)
+        self._write_config("b@example.com", mtime=2000)
+        app._watch_tick()
+        assert refreshes == [True]
+
+    def test_a_no_op_rewrite_does_not_repaint(self, tmp_path):
+        """Claude Code rewrites ~/.claude.json constantly; mtime alone would
+        make the TUI repaint every second forever."""
+        self._write_config("a@example.com", mtime=1000)
+        app, refreshes = self._app(tmp_path)
+        self._write_config("a@example.com", mtime=2000)
+        app._watch_tick()
+        assert refreshes == []
+
+    def test_a_threshold_set_elsewhere_moves_the_bar_tick(self, tmp_path):
+        import os
+
+        from claude_swap.settings import set_setting
+
+        self._write_config("a@example.com", mtime=1000)
+        set_setting(tmp_path, "autoswitch.threshold", "80")
+        app, refreshes = self._app(tmp_path)
+        assert app.threshold_pct == 80
+        set_setting(tmp_path, "autoswitch.threshold", "95")
+        settings = tmp_path / "settings.json"
+        os.utime(settings, (2000, 2000))
+        app._watch_tick()
+        assert app.threshold_pct == 95
+        assert refreshes == [True]

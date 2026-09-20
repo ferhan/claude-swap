@@ -107,6 +107,20 @@ def test_build_plist_path_env_keeps_the_launchd_defaults(tmp_path):
     assert {"/usr/bin", "/bin", "/usr/sbin", "/sbin"} <= set(entries)
 
 
+def test_build_plist_runs_whatever_subcommand_it_is_given(tmp_path):
+    # The backend service is this module with a different label and argv.
+    parsed = plistlib.loads(
+        launch_agent.build_plist(
+            PROGRAM, launch_agent.AUTO_LABEL, tmp_path, args=("auto",)
+        )
+    )
+    assert parsed["Label"] == "com.cswap.auto"
+    assert parsed["ProgramArguments"] == [*PROGRAM, "auto"]
+    assert parsed["StandardErrorPath"] == str(
+        tmp_path / "Library/Logs" / "com.cswap.auto.err"
+    )
+
+
 # --- program resolution ----------------------------------------------------
 
 
@@ -260,6 +274,18 @@ def test_install_refuses_off_macos(tmp_path):
             launch_agent.install(home=tmp_path, program=PROGRAM, uid=UID)
 
 
+def test_install_hands_launchd_the_subcommand_it_was_given(tmp_path):
+    with patch.object(launch_agent.subprocess, "run") as run:
+        run.side_effect = _router({"print": _completed(1)})
+        result = launch_agent.install(
+            launch_agent.AUTO_LABEL, tmp_path, PROGRAM, UID, args=("auto",)
+        )
+
+    assert result["program"] == [*PROGRAM, "auto"]
+    parsed = plistlib.loads(Path(result["plist"]).read_bytes())
+    assert parsed["ProgramArguments"] == [*PROGRAM, "auto"]
+
+
 # --- uninstall -------------------------------------------------------------
 
 
@@ -394,3 +420,142 @@ def test_status_ignores_a_non_numeric_pid_line(tmp_path):
         run.side_effect = _router({"print": _completed(0, stdout="\tpid = (none)\n")})
         result = launch_agent.status(home=tmp_path, uid=UID)
     assert result["pid"] is None
+
+
+def test_status_names_the_program_the_installed_plist_runs(tmp_path):
+    """One label, two possible owners.
+
+    A dev checkout and a `uv tool install` install under the SAME label, and
+    whichever ran --install-service last silently owns it. Reporting the argv
+    the plist on disk actually carries is what makes that visible.
+    """
+    with patch.object(launch_agent.subprocess, "run") as run:
+        run.side_effect = _router({"print": _completed(1)})
+        launch_agent.install(home=tmp_path, program=PROGRAM, uid=UID)
+        result = launch_agent.status(home=tmp_path, uid=UID)
+
+    assert result["program"] == [*PROGRAM, "menubar"]
+
+
+def test_status_program_is_none_when_no_plist_is_installed(tmp_path):
+    with patch.object(launch_agent.subprocess, "run") as run:
+        run.side_effect = _router({"print": _completed(1)})
+        result = launch_agent.status(home=tmp_path, uid=UID)
+    assert result["program"] is None
+
+
+# --- backend detection -----------------------------------------------------
+
+
+def test_backend_is_loaded_asks_launchd_about_the_auto_label():
+    with patch.object(launch_agent.subprocess, "run") as run:
+        run.side_effect = _router({"print": _completed(0)})
+        assert launch_agent.backend_is_loaded() is True
+    printed = [c.args[0] for c in run.call_args_list if c.args[0][1] == "print"]
+    assert printed and printed[0][2].endswith("/com.cswap.auto")
+
+
+def test_backend_is_loaded_is_false_when_launchd_does_not_know_it():
+    with patch.object(launch_agent.subprocess, "run") as run:
+        run.side_effect = _router({"print": _completed(1)})
+        assert launch_agent.backend_is_loaded() is False
+
+
+def test_backend_is_loaded_never_shells_out_off_macos():
+    # The TUI runs on Linux, where there are no LaunchAgents to defer to.
+    with patch.object(launch_agent.sys, "platform", "linux"), \
+         patch.object(launch_agent.subprocess, "run") as run:
+        assert launch_agent.backend_is_loaded() is False
+    run.assert_not_called()
+
+
+# --- who is actually running an engine --------------------------------------
+#
+# The surfaces' badge bug lived here: `backend_is_loaded` answers "is the
+# label loaded", which is not "is something ticking".
+
+
+def test_engine_owner_reports_nobody_without_touching_the_lock_file(tmp_path):
+    """Asking must not create the lock: FileLock opens "w", so a probe on a
+    machine where no engine ever ran would leave one behind."""
+    with patch.object(launch_agent.subprocess, "run") as run:
+        assert launch_agent.engine_owner(tmp_path) == (launch_agent.ENGINE_NONE, "")
+    run.assert_not_called()
+    assert not (tmp_path / ".engine.lock").exists()
+
+
+def test_engine_owner_reports_nobody_when_the_lock_is_free(tmp_path):
+    from claude_swap.locking import EngineLock, engine_lock_path
+
+    lock = EngineLock(engine_lock_path(tmp_path))
+    assert lock.acquire() is True
+    lock.release()  # file now exists but is unheld
+    assert launch_agent.engine_owner(tmp_path) == (launch_agent.ENGINE_NONE, "")
+
+
+def test_engine_owner_recognises_this_process_holding_it(tmp_path):
+    from claude_swap.locking import EngineLock, engine_lock_path
+
+    lock = EngineLock(engine_lock_path(tmp_path))
+    assert lock.acquire() is True
+    try:
+        state, detail = launch_agent.engine_owner(tmp_path)
+    finally:
+        lock.release()
+    assert state == launch_agent.ENGINE_SELF
+    assert str(os.getpid()) in detail
+
+
+def test_engine_owner_names_the_backend_when_the_pids_match(tmp_path):
+    _seed_owner(tmp_path, pid=4242, program="/tmp/cswap auto --json")
+    with patch.object(launch_agent, "backend_pid", lambda: 4242):
+        state, detail = _owner_while_held(tmp_path)
+    assert state == launch_agent.ENGINE_BACKEND
+    assert "4242" in detail
+
+
+def test_engine_owner_calls_a_foreign_holder_what_it_is(tmp_path):
+    """A hand-run `cswap auto` is neither us nor the service. A surface that
+    called this "backend" would be as wrong as one that called it "ours"."""
+    _seed_owner(tmp_path, pid=4242, program="/usr/local/bin/cswap auto")
+    with patch.object(launch_agent, "backend_pid", lambda: None):
+        state, detail = _owner_while_held(tmp_path)
+    assert state == launch_agent.ENGINE_OTHER
+    assert detail == "pid 4242 (/usr/local/bin/cswap auto)"
+
+
+def _seed_owner(backup_dir: Path, *, pid: int, program: str) -> None:
+    import json
+
+    from claude_swap.locking import engine_lock_path
+
+    path = engine_lock_path(backup_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.with_name(path.name + ".owner").write_text(
+        json.dumps({"pid": pid, "program": program}), encoding="utf-8"
+    )
+
+
+def _owner_while_held(backup_dir: Path):
+    """``engine_owner`` with the lock genuinely held while the sidecar names
+    someone else.
+
+    Held from this process with a bare ``FileLock`` — a second fd conflicts
+    under flock exactly as another process would — so the lock says "held"
+    and the sidecar says by whom, which is the split the real thing relies on.
+    """
+    from claude_swap.locking import FileLock, engine_lock_path
+
+    holder = FileLock(engine_lock_path(backup_dir), timeout=0.0)
+    assert holder.acquire() is True
+    try:
+        return launch_agent.engine_owner(backup_dir)
+    finally:
+        holder.release()
+
+
+def test_backend_pid_never_shells_out_off_macos():
+    with patch.object(launch_agent.sys, "platform", "linux"), \
+         patch.object(launch_agent.subprocess, "run") as run:
+        assert launch_agent.backend_pid() is None
+    run.assert_not_called()

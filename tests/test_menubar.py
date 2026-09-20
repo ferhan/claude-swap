@@ -72,7 +72,6 @@ def test_settings_defaults_when_file_missing(tmp_path: Path):
     assert s.show_account_name is True
     assert s.title_pct == "both"
     assert s.refresh_interval == 60
-    assert s.auto_switch_enabled is False
 
 
 def test_settings_round_trip(tmp_path: Path):
@@ -81,11 +80,27 @@ def test_settings_round_trip(tmp_path: Path):
         show_account_name=False,
         title_pct="5h",
         refresh_interval=300,
-        auto_switch_enabled=True,
     )
     original.save(path)
     loaded = menubar.MenuBarSettings.load(path)
     assert loaded == original
+
+
+def test_settings_no_longer_carry_the_auto_switch_toggle(tmp_path: Path):
+    """The on/off toggle moved to the shared ``autoswitch.enabled``.
+
+    A value left behind in an old menubar_settings.json must stay ignored
+    rather than shadow it: the menu bar, the CLI and the backend service have
+    to read one switch, and this file reaches no other process.
+    """
+    path = tmp_path / "menubar_settings.json"
+    path.write_text(
+        json.dumps({"auto_switch_enabled": True, "refresh_interval": 30}),
+        encoding="utf-8",
+    )
+    s = menubar.MenuBarSettings.load(path)
+    assert not hasattr(s, "auto_switch_enabled")
+    assert s.refresh_interval == 30
 
 
 def test_settings_corrupt_file_falls_back_to_defaults(tmp_path: Path):
@@ -681,3 +696,46 @@ class TestFrameworkBuildWarning:
         # The symptom is that everything looks healthy, so say so.
         msg = menubar.framework_build_warning("Python", "uv", "26.6.2")
         assert "logs nothing" in msg
+
+
+# --- which process is running the engine ------------------------------------
+#
+# The menu line has to tell three cases apart. The bug it replaces decided
+# from the launchd label alone, so a hand-run `cswap auto` holding the lock
+# read as "nothing running" and the surface claimed the engine as its own.
+
+
+def test_engine_owner_label_names_this_app():
+    from claude_swap import launch_agent
+
+    assert (
+        menubar.engine_owner_label(launch_agent.ENGINE_SELF, "pid 1 (x)")
+        == "Engine: this menu bar"
+    )
+
+
+def test_engine_owner_label_names_the_backend_service():
+    from claude_swap import launch_agent
+
+    assert (
+        menubar.engine_owner_label(launch_agent.ENGINE_BACKEND, "pid 4242 (x)")
+        == "Engine: backend service"
+    )
+
+
+def test_engine_owner_label_names_a_foreign_holder_rather_than_claiming_it():
+    from claude_swap import launch_agent
+
+    label = menubar.engine_owner_label(
+        launch_agent.ENGINE_OTHER, "pid 4242 (/usr/local/bin/cswap auto)"
+    )
+    assert label == "Engine: pid 4242 (/usr/local/bin/cswap auto)"
+
+
+def test_engine_owner_label_says_so_when_nothing_ticks():
+    from claude_swap import launch_agent
+
+    assert (
+        menubar.engine_owner_label(launch_agent.ENGINE_NONE, "")
+        == "Engine: not running"
+    )

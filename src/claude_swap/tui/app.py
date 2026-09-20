@@ -17,7 +17,7 @@ from textual.binding import Binding
 from textual.reactive import reactive
 from textual.worker import WorkerState
 
-from claude_swap import printer
+from claude_swap import paths, printer, state_watch
 from claude_swap.models import AccountsSnapshot
 from claude_swap.snapshot_source import account_identity
 from claude_swap.settings import load_settings, load_ui_settings, set_setting
@@ -82,6 +82,13 @@ class CswapApp(App):
             self._theme_name = load_ui_settings(switcher.backup_dir).theme
         except Exception:
             self._theme_name = "auto"
+        # State changed by anyone -- `cswap switch` in another terminal, the
+        # backend, the menu bar -- reaches this app within ~1s through this
+        # watch (see claude_swap.state_watch). Measurements do not: the store
+        # paces those for every surface alike, so the 3s poll owns them.
+        self._watch = state_watch.StateWatcher(
+            paths.get_global_config_path(), switcher.backup_dir
+        )
 
     def on_mount(self) -> None:
         self.register_theme(CSWAP_DARK)
@@ -96,6 +103,7 @@ class CswapApp(App):
             self.push_screen(WatchScreen())
         self.set_interval(self.POLL_INTERVAL_S, self._tick)
         self.set_interval(1.0, self._update_refresh_status)
+        self.set_interval(1.0, self._watch_tick)
         self._tick()
 
     # -- snapshot poll loop ---------------------------------------------------
@@ -202,6 +210,25 @@ class CswapApp(App):
             if elapsed >= self.POLL_INTERVAL_S:
                 parts.append(f"refreshing {format_duration(elapsed)}")
         self.refresh_status = " · ".join(parts)
+
+    def _watch_tick(self) -> None:
+        """Re-read what a cheap local file says, when it says something new.
+
+        Only the mtime-gated, value-compared paths in ``state_watch`` run per
+        second; the repaint they trigger is the same store-only snapshot pass
+        the poll tick already makes, so this cannot provoke network traffic.
+        """
+        changed = self._watch.poll()
+        if not changed:
+            return
+        if state_watch.SETTINGS in changed:
+            # The threshold tick drawn on every bar is loaded once at startup;
+            # follow a `cswap config set` or a menu-bar change made since.
+            try:
+                self.threshold_pct = load_settings(self.switcher.backup_dir).threshold
+            except Exception:
+                pass
+        self.request_refresh()
 
     def request_refresh(self, *, full: bool = False) -> None:
         if full:

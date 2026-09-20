@@ -1,0 +1,135 @@
+{
+  "schemaVersion": 1,
+  "takenAt": "2026-09-20T10:03:48Z",
+  "activeAccountNumber": 1,
+  "accounts": [
+    {
+      "number": 1,
+      "email": "dev@example.com",
+      "organizationName": "Example Org",
+      "organizationUuid": "00000000-0000-4000-8000-000000000001",
+      "isOrganization": true,
+      "active": true,
+      "kind": "oauth",
+      "switchable": true,
+      "usageStatus": "ok",
+      "usage": {
+        "fiveHour": {
+          "pct": 62.5,
+          "resetsAt": "2026-09-20T13:33:43.377897+00:00",
+          "countdown": "3h 29m",
+          "clock": "13:33"
+        },
+        "sevenDay": {
+          "pct": 88.0,
+          "resetsAt": "2026-09-23T21:33:43.377897+00:00",
+          "countdown": "3d 11h",
+          "clock": "Sep 23 21:33",
+          "expectedPct": 50.3,
+          "aheadOfPace": true,
+          "projectedExhaustionAt": "2026-09-20T21:33:28Z",
+          "willLastToReset": false
+        },
+        "spend": {
+          "used": 12.5,
+          "limit": 300.0,
+          "pct": 4.2,
+          "currency": "USD",
+          "resetsAt": "2026-10-01T00:00:00.000000+00:00",
+          "countdown": "10d 13h",
+          "clock": "Oct 1 00:00"
+        }
+      },
+      "alias": "work",
+      "usageFetchedAt": "2026-09-20T10:02:18Z",
+      "usageAgeSeconds": 90.0
+    },
+    {
+      "number": 2,
+      "email": "second@example.com",
+      "organizationName": "",
+      "organizationUuid": "",
+      "isOrganization": false,
+      "active": false,
+      "kind": "oauth",
+      "switchable": true,
+      "usageStatus": "ok",
+      "usage": {
+        "fiveHour": {
+          "pct": 5.0,
+          "resetsAt": "2026-09-20T12:48:12.114530+00:00",
+          "countdown": "2h 44m",
+          "clock": "12:48"
+        },
+        "sevenDay": {
+          "pct": 12.0,
+          "resetsAt": "2026-09-27T03:03:48.512345+00:00",
+          "countdown": "6d 17h",
+          "clock": "Sep 27 03:03"
+        }
+      },
+      "usageFetchedAt": "2026-09-20T09:03:48Z",
+      "usageAgeSeconds": 3600.0
+    },
+    {
+      "number": 3,
+      "email": "third@example.com",
+      "organizationName": "Example Team",
+      "organizationUuid": "00000000-0000-4000-8000-000000000003",
+      "isOrganization": true,
+      "active": false,
+      "kind": "oauth",
+      "switchable": true,
+      "usageStatus": "ok",
+      "usage": {
+        "fiveHour": {
+          "pct": 41.0,
+          "resetsAt": "2026-09-20T11:12:05.980112+00:00",
+          "countdown": "1h 8m",
+          "clock": "11:12"
+        },
+        "scoped": [
+          {
+            "pct": 100.0,
+            "resetsAt": "2026-09-24T08:15:00.240921+00:00",
+            "countdown": "3d 22h",
+            "clock": "Sep 24 08:15",
+            "expectedPct": 43.9,
+            "aheadOfPace": true,
+            "projectedExhaustionAt": "2026-09-20T10:01:48Z",
+            "willLastToReset": false,
+            "name": "Opus",
+            "maxed": true
+          },
+          {
+            "pct": 30.0,
+            "resetsAt": "2026-09-24T08:15:00.240921+00:00",
+            "countdown": "3d 22h",
+            "clock": "Sep 24 08:15",
+            "expectedPct": 43.9,
+            "aheadOfPace": false,
+            "projectedExhaustionAt": "2026-09-27T14:10:59Z",
+            "willLastToReset": true,
+            "name": "Sonnet",
+            "maxed": false
+          }
+        ]
+      },
+      "usageFetchedAt": "2026-09-20T10:01:48Z",
+      "usageAgeSeconds": 120.0
+    },
+    {
+      "number": 4,
+      "email": "apikey@example.com",
+      "organizationName": "",
+      "organizationUuid": "",
+      "isOrganization": false,
+      "active": false,
+      "kind": "api_key",
+      "switchable": false,
+      "usageStatus": "api_key",
+      "usage": null,
+      "disabled": true
+    }
+  ]
+}

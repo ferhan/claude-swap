@@ -183,6 +183,9 @@ This will update the stored credentials without creating a duplicate.
 ```bash
 cswap run 2                     # Run an account in this terminal only (session mode)
 cswap auto                      # Auto-switch when nearing rate limits (see above)
+cswap service install           # Run that engine as a background launchd agent (macOS)
+cswap service status            # Is the backend running, and which build launchd holds
+cswap service logs -f           # Follow the backend's event stream
 cswap config                    # Show or edit settings (see Configuration below)
 cswap list                      # Show all accounts with 5h/7d usage and reset times
 cswap list --token-status       # Add source-labelled OAuth token diagnostics

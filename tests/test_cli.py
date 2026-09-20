@@ -533,6 +533,7 @@ class TestCLI:
                     "state": "running",
                     "pid": 4242,
                     "plist": "/tmp/p.plist",
+                    "program": ["/tmp/cswap", "menubar"],
                 },
             ),
         )
@@ -1059,8 +1060,9 @@ class TestAutoCommand:
         tick_outcome = None  # set per test (TickOutcome)
 
         def __init__(self, switcher, settings, on_event, *, dry_run=False,
-                     state_path=None, clock=None):
+                     state_path=None, snapshot_path=None, clock=None):
             self.switcher = switcher
+            self.snapshot_path = snapshot_path
             self.settings = settings
             self.on_event = on_event
             self.dry_run = dry_run
@@ -1129,6 +1131,51 @@ class TestAutoCommand:
     def test_dry_run_forwarded(self, temp_home):
         self._run(["--once", "--dry-run"], temp_home)
         assert self.FakeEngine.instances[-1].dry_run is True
+
+    def test_publishes_the_snapshot_where_gui_shells_read_it(self, temp_home):
+        # The widget's sandbox entitlement names this exact path.
+        from claude_swap.snapshot_json import default_snapshot_path
+
+        self._run(["--once"], temp_home)
+        assert self.FakeEngine.instances[-1].snapshot_path == default_snapshot_path()
+
+    def test_snapshot_out_overrides_the_published_path(self, temp_home):
+        self._run(["--once", "--snapshot-out", "/tmp/x.json"], temp_home)
+        assert self.FakeEngine.instances[-1].snapshot_path == Path("/tmp/x.json")
+
+    def test_no_snapshot_publishes_nothing(self, temp_home):
+        self._run(["--once", "--no-snapshot"], temp_home)
+        assert self.FakeEngine.instances[-1].snapshot_path is None
+
+    def test_install_service_routes_to_the_backend_label(self, temp_home, capsys):
+        seen = {}
+
+        def _install(**kwargs):
+            seen.update(kwargs)
+            return {
+                "label": "com.cswap.auto",
+                "plist": "/tmp/a.plist",
+                "program": ["/tmp/cswap", "auto"],
+                "stdout_log": "/tmp/o.log",
+                "stderr_log": "/tmp/e.log",
+            }
+
+        with patch("claude_swap.launch_agent.install", _install), \
+             patch.object(sys, "platform", "darwin"), \
+             patch.object(sys, "argv", ["claude-swap", "auto", "--install-service"]):
+            with pytest.raises(SystemExit) as exc:
+                cli.main()
+
+        assert exc.value.code == 0
+        assert seen["label"] == "com.cswap.auto"
+        # --json: the stdout log is the stream the surfaces read.
+        assert seen["args"] == ("auto", "--json")
+        # The service flags must not also start a foreground engine.
+        assert self.FakeEngine.instances == []
+        out = capsys.readouterr().out
+        assert "installed" in out
+        assert "/tmp/cswap auto" in out  # which build launchd now holds
+        assert "autoswitch.enabled" in out  # installing is not the opt-in
 
     def test_json_stdout_is_pure_jsonl(self, temp_home, capsys):
         from claude_swap.autoswitch import NoSwitchEvent, TickOutcome
@@ -1767,3 +1814,175 @@ def test_importing_the_module_allocates_no_temp_dir(tmp_path, tmp_path_factory):
     home = Path(_subprocess_env()["HOME"])
     assert home.is_dir(), f"the isolated HOME is not a real directory: {home}"
     assert home.is_relative_to(tmp_path_factory.getbasetemp()), f"{home} escapes basetemp"
+
+
+class TestServiceCommand:
+    """`cswap service` — the backend named for what it is, not for a policy."""
+
+    def _stub_launch_agent(self, monkeypatch, status=None):
+        seen = {}
+
+        def _record(name, payload):
+            def _call(*a, **k):
+                seen[name] = k
+                return payload
+
+            return _call
+
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(
+            "claude_swap.launch_agent.install",
+            _record(
+                "install",
+                {
+                    "label": "com.cswap.auto",
+                    "plist": "/tmp/a.plist",
+                    "program": ["/tmp/cswap", "auto"],
+                    "stdout_log": "/tmp/o.log",
+                    "stderr_log": "/tmp/e.log",
+                },
+            ),
+        )
+        monkeypatch.setattr(
+            "claude_swap.launch_agent.uninstall",
+            _record(
+                "uninstall",
+                {"label": "com.cswap.auto", "was_loaded": True, "removed_plist": True},
+            ),
+        )
+        monkeypatch.setattr(
+            "claude_swap.launch_agent.status",
+            _record(
+                "status",
+                status
+                or {
+                    "label": "com.cswap.auto",
+                    "installed": True,
+                    "loaded": True,
+                    "state": "running",
+                    "pid": 4242,
+                    "plist": "/tmp/a.plist",
+                    "program": ["/tmp/cswap", "auto"],
+                },
+            ),
+        )
+        return seen
+
+    def _run(self, monkeypatch, argv):
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        return exc.value.code
+
+    def test_install_routes_to_the_backend_label(self, monkeypatch, capsys, temp_home):
+        seen = self._stub_launch_agent(monkeypatch)
+        assert self._run(monkeypatch, ["cswap", "service", "install"]) == 0
+        assert seen["install"]["label"] == "com.cswap.auto"
+        assert seen["install"]["args"] == ("auto", "--json")
+        out = capsys.readouterr().out
+        assert "installed" in out
+        assert "autoswitch.enabled" in out  # installing is not the opt-in
+
+    def test_uninstall_routes_to_the_backend_label(self, monkeypatch, capsys, temp_home):
+        seen = self._stub_launch_agent(monkeypatch)
+        assert self._run(monkeypatch, ["cswap", "service", "uninstall"]) == 0
+        assert seen["uninstall"]["label"] == "com.cswap.auto"
+        assert "removed" in capsys.readouterr().out
+
+    def test_status_reports_program_path_and_engine_lock(
+        self, monkeypatch, capsys, temp_home
+    ):
+        from claude_swap import paths
+        from claude_swap.locking import EngineLock, engine_lock_path
+
+        self._stub_launch_agent(monkeypatch)
+        holder = EngineLock(engine_lock_path(paths.get_backup_root()))
+        assert holder.acquire() is True
+        try:
+            assert self._run(monkeypatch, ["cswap", "service", "status"]) == 0
+        finally:
+            holder.release()
+        out = capsys.readouterr().out
+        assert "running" in out and "4242" in out
+        # Which build launchd holds: the dev-checkout / global-install collision.
+        assert "/tmp/cswap auto" in out
+        assert f"held by pid {os.getpid()}" in out
+
+    def test_status_says_when_no_engine_is_ticking(
+        self, monkeypatch, capsys, temp_home
+    ):
+        self._stub_launch_agent(
+            monkeypatch,
+            status={
+                "label": "com.cswap.auto",
+                "installed": False,
+                "loaded": False,
+                "state": None,
+                "pid": None,
+                "plist": "/tmp/a.plist",
+                "program": None,
+            },
+        )
+        assert self._run(monkeypatch, ["cswap", "service", "status"]) == 0
+        out = capsys.readouterr().out
+        assert "not installed" in out
+        assert "not held" in out  # reported even with no service installed
+
+    def test_bare_service_is_status(self, monkeypatch, capsys, temp_home):
+        self._stub_launch_agent(monkeypatch)
+        assert self._run(monkeypatch, ["cswap", "service"]) == 0
+        assert "Backend service" in capsys.readouterr().out
+
+    def test_logs_tails_the_stdout_log(self, monkeypatch, capsys, temp_home):
+        log = temp_home / "Library" / "Logs" / "com.cswap.auto.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("".join(f"line {i}\n" for i in range(10)), encoding="utf-8")
+        monkeypatch.setattr(sys, "platform", "darwin")
+
+        assert self._run(monkeypatch, ["cswap", "service", "logs", "-n", "3"]) == 0
+        out = capsys.readouterr().out
+        assert "line 9" in out and "line 7" in out
+        assert "line 6" not in out
+
+    def test_logs_renders_the_json_stream_back_as_human_lines(
+        self, monkeypatch, capsys, temp_home
+    ):
+        """The backend logs JSONL so the surfaces can read it; a person
+        reading `service logs` still wants the line, not the payload."""
+        import json as _json
+
+        from claude_swap.autoswitch import SwitchEvent
+
+        log = temp_home / "Library" / "Logs" / "com.cswap.auto.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        event = SwitchEvent(
+            trigger="proactive",
+            from_ref={"number": 1, "email": "a@example.com"},
+            to_ref={"number": 2, "email": "b@example.com"},
+            ts="2026-09-20T14:03:11Z",
+        )
+        log.write_text(_json.dumps(event.to_json()) + "\n", encoding="utf-8")
+        monkeypatch.setattr(sys, "platform", "darwin")
+
+        assert self._run(monkeypatch, ["cswap", "service", "logs"]) == 0
+        out = capsys.readouterr().out
+        assert "14:03:11  Switched Account-1 -> Account-2 (b@example.com) (proactive)" in out
+        assert "schemaVersion" not in out
+
+    def test_logs_without_a_log_file_says_so(self, monkeypatch, capsys, temp_home):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        assert self._run(monkeypatch, ["cswap", "service", "logs"]) == 1
+        assert "No backend log" in capsys.readouterr().out
+
+    def test_auto_service_flags_still_work_but_warn(
+        self, monkeypatch, capsys, temp_home
+    ):
+        # Deprecated, not removed: the old spelling is in published docs and
+        # in users' scripts, where an argparse error would be a worse answer.
+        seen = self._stub_launch_agent(monkeypatch)
+        assert self._run(monkeypatch, ["cswap", "auto", "--service-status"]) == 0
+        assert "status" in seen
+        captured = capsys.readouterr()
+        assert "Backend service" in captured.out
+        assert "deprecated" in captured.err
+        assert "cswap service status" in captured.err
