@@ -6,6 +6,10 @@ accounts on its own; going live is an explicit, confirmed action. The
 engine's own state file semantics (shared cooldown, quarantine list, state
 lock) make it safe to run alongside an external ``cswap auto``.
 
+When the backend owns the engine (always, on macOS, once the TUI has started
+it) this screen hosts none: it tails the backend's events, and its live/dry
+toggle is ``autoswitch.enabled``, confirmed the same way.
+
 The active account's full card sits on top (same widget as the dashboard's
 panel, with the threshold tick); this screen adds the engine badge, the
 ranked switch candidates, and the decision log. While it is up, the app's
@@ -33,7 +37,12 @@ from claude_swap.autoswitch import (
     pct_label,
 )
 from claude_swap.models import AccountsSnapshot
-from claude_swap.settings import SETTING_SPECS, load_settings, parse_model_names
+from claude_swap.settings import (
+    SETTING_SPECS,
+    load_settings,
+    parse_model_names,
+    set_setting,
+)
 from claude_swap.tui import data
 from claude_swap.tui.modals import ConfirmModal
 from claude_swap.tui.theme import Palette
@@ -126,6 +135,11 @@ class AutoScreen(Screen):
         # the one that exists — and says which, rather than guessing from the
         # launchd label (which misses a hand-run `cswap auto` entirely).
         self._owner, detail = launch_agent.engine_owner(self.app.switcher.backup_dir)
+        if self._owner == launch_agent.ENGINE_NONE and self.app.backend_managed:
+            # The backend was just started and has not taken the lock yet.
+            # Hosting an engine here would win that race and leave launchd
+            # restarting a backend that can never tick.
+            self._owner = launch_agent.ENGINE_BACKEND
         if self._owner == launch_agent.ENGINE_BACKEND:
             self._note(
                 "— the cswap auto backend service owns auto-switching; "
@@ -149,6 +163,8 @@ class AutoScreen(Screen):
             )
             self._update_badge()
             return
+        if self.app.backend_error:
+            self._note(f"— backend not started ({self.app.backend_error}) —")
         self._start_engine(dry_run=True)
 
     def on_unmount(self) -> None:
@@ -294,6 +310,23 @@ class AutoScreen(Screen):
             self.app.request_refresh()
 
     def action_toggle_live(self) -> None:
+        if self._owner == launch_agent.ENGINE_BACKEND:
+            # No engine here to restart: the backend's live/dry switch is
+            # autoswitch.enabled, which it re-reads every tick.
+            if self._backend_enabled():
+                self._set_backend_enabled(False)
+            else:
+                self.app.push_screen(
+                    ConfirmModal(
+                        "Go live? claude-swap will switch your active account "
+                        "automatically when the threshold is reached.\n\n"
+                        "(Sets autoswitch.enabled, which every surface shares.)",
+                        title="Go live",
+                        yes_label="Go live",
+                    ),
+                    self._on_backend_live_confirm,
+                )
+            return
         if self._engine is None:
             return
         if self._engine.dry_run:
@@ -314,6 +347,33 @@ class AutoScreen(Screen):
         if confirmed:
             self._restart_engine(dry_run=False)
 
+    def _on_backend_live_confirm(self, confirmed: bool | None) -> None:
+        if confirmed:
+            self._set_backend_enabled(True)
+
+    def _backend_enabled(self) -> bool:
+        try:
+            return load_settings(self.app.switcher.backup_dir).enabled
+        except Exception:
+            return False
+
+    def _set_backend_enabled(self, enabled: bool) -> None:
+        try:
+            set_setting(
+                self.app.switcher.backup_dir,
+                "autoswitch.enabled",
+                "true" if enabled else "false",
+            )
+        except Exception as e:
+            self._note(f"— couldn't set autoswitch.enabled: {e} —")
+            return
+        self._update_badge()
+        self._note(
+            "— backend: LIVE (will switch accounts) —"
+            if enabled
+            else "— backend: poll-only (never switches) —"
+        )
+
     def _restart_engine(self, *, dry_run: bool) -> None:
         if self._engine is not None:
             self._engine.stop()
@@ -322,8 +382,14 @@ class AutoScreen(Screen):
     def _update_badge(self) -> None:
         badge = self.query_one("#mode-badge", Static)
         if self._owner == launch_agent.ENGINE_BACKEND:
-            badge.update(" BACKEND ")
-            badge.set_classes("dry")
+            # Read per render, so a toggle from the menu bar or `cswap config`
+            # shows here on the next snapshot (see _on_snapshot).
+            if self._backend_enabled():
+                badge.update(" BACKEND · LIVE ")
+                badge.set_classes("live")
+            else:
+                badge.update(" BACKEND ")
+                badge.set_classes("dry")
         elif self._owner == launch_agent.ENGINE_OTHER:
             # Not DRY-RUN: that would claim this screen is watching without
             # switching, when in fact another process may be switching live.
@@ -341,6 +407,8 @@ class AutoScreen(Screen):
     def _on_snapshot(self, snap: AccountsSnapshot | None) -> None:
         if snap is None:
             return
+        if self._owner == launch_agent.ENGINE_BACKEND:
+            self._update_badge()
         self.query_one("#candidates", Static).update(
             self._candidates_text(snap, active_number=snap.active_number)
         )

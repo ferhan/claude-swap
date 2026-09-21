@@ -56,9 +56,16 @@ class CswapApp(App):
         *,
         start: str = "dashboard",
         detected: str | None = None,
+        backend_managed: bool = False,
+        backend_error: str | None = None,
     ) -> None:
         super().__init__()
         self.switcher = switcher
+        # True when this TUI started (or found) the backend, which then owns
+        # the engine — even before it has taken the engine lock. The auto
+        # screen must not host a second engine in that window.
+        self.backend_managed = backend_managed
+        self.backend_error = backend_error
         self._start = start  # "dashboard" | "watch" (`cswap watch`)
         self._detected = detected  # terminal background sensed pre-driver, or None
         self.source = SnapshotSource(switcher)

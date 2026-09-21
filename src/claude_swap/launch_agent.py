@@ -44,6 +44,14 @@ LABEL = "com.cswap.menubar"
 # menu bar and the TUI check for before hosting an engine of their own.
 AUTO_LABEL = "com.cswap.auto"
 
+# What each agent's ProgramArguments carry after the program. The menu bar
+# agent runs the foreground app (plain `cswap menubar` installs the agent and
+# returns). The backend logs JSONL — its stdout log is the event stream the
+# surfaces tail (see autoswitch.BackendEventLog) — and `--backend` is what
+# lets it retire once no surface is open; a hand-run `cswap auto` never does.
+MENUBAR_ARGS = ("menubar", "--foreground")
+BACKEND_ARGS = ("auto", "--json", "--backend")
+
 # launchd's default PATH is /usr/bin:/bin:/usr/sbin:/sbin, which covers
 # `security` (Keychain reads) but not a Homebrew or ~/.local/bin `claude`. The
 # menu bar shells out to detect running sessions, so seed a PATH that finds it.
@@ -56,6 +64,10 @@ _BASE_PATH_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 # assuming bootout was synchronous (Homebrew's services code does the same).
 _UNLOAD_TIMEOUT_SECONDS = 5.0
 _UNLOAD_POLL_SECONDS = 0.1
+# How long a lifecycle decision waits for another one in flight: long enough
+# to cover an install's bootout wait, so two surfaces opening together
+# serialize instead of the second one falling back to hosting an engine.
+_LIFECYCLE_TIMEOUT_SECONDS = _UNLOAD_TIMEOUT_SECONDS + 10.0
 
 
 def _require_macos() -> None:
@@ -129,7 +141,7 @@ def build_plist(
     program: list[str] | None = None,
     label: str = LABEL,
     home: Path | None = None,
-    args: Sequence[str] = ("menubar",),
+    args: Sequence[str] = MENUBAR_ARGS,
 ) -> bytes:
     """Serialize the LaunchAgent plist.
 
@@ -277,8 +289,8 @@ def status(label: str = LABEL, uid: int | None = None, home: Path | None = None)
         "pid": pid,
         "plist": str(target_plist),
         # One label, two possible owners: a `uv tool install` and a dev
-        # checkout both install under the same name, and whichever ran
-        # --install-service last silently owns it. Report the argv the plist
+        # checkout both install under the same name, and whichever opened a
+        # surface last owns it. Report the argv the plist
         # on disk actually carries so which build is installed is visible
         # instead of guessed.
         "program": _plist_program(target_plist),
@@ -300,7 +312,7 @@ def install(
     home: Path | None = None,
     program: list[str] | None = None,
     uid: int | None = None,
-    args: Sequence[str] = ("menubar",),
+    args: Sequence[str] = MENUBAR_ARGS,
 ) -> dict:
     """Write the plist and hand the service to launchd.
 
@@ -369,3 +381,106 @@ def uninstall(
         target_plist.unlink()
 
     return {"label": label, "was_loaded": was_loaded, "removed_plist": existed}
+
+
+# -- surfaces and the backend's lifetime --------------------------------------
+#
+# The backend runs exactly while some surface is open. A surface registers
+# itself, then makes sure the backend is up; the backend, on its own timer,
+# retires once no surface is left. Both decisions are taken under the one
+# lifecycle lock (see ``locking.lifecycle_lock``), so neither can act on a
+# picture the other is halfway through changing.
+
+
+def needs_install(
+    label: str,
+    args: Sequence[str],
+    home: Path | None = None,
+    uid: int | None = None,
+) -> bool:
+    """Whether ``label`` must be (re)installed for this build to own it.
+
+    True when it isn't running, or when the plist on disk carries a different
+    argv — another checkout or install put it there, and the newest caller
+    wins, so the build the user just ran is the one launchd holds.
+    """
+    current = status(label, uid, home)
+    return current["pid"] is None or current["program"] != [*resolve_program(), *args]
+
+
+def ensure_running(
+    label: str,
+    args: Sequence[str],
+    home: Path | None = None,
+    uid: int | None = None,
+) -> bool:
+    """Install ``label`` unless it is already running this build. True if
+    it had to be (re)installed."""
+    if not needs_install(label, args, home, uid):
+        return False
+    install(label=label, home=home, uid=uid, args=args)
+    return True
+
+
+def open_surface(backup_dir: Path, kind: str | None, home: Path | None = None):
+    """Register this process as an open surface and make sure the backend runs.
+
+    Returns ``(registration, managed, error)``. Keep ``registration`` alive
+    for the life of the surface; it is None off macOS, where there is no
+    backend and surfaces host their own engine as they always have.
+    ``managed`` is True when the backend is up and owns the engine; when it
+    is False, ``error`` says why and the caller carries on without it — a
+    surface that cannot reach launchd must still open.
+
+    Register first, then ensure: by the time the backend can first look for
+    surfaces, the one that started it is already there to be found. ``kind``
+    None ensures without registering, for ``cswap menubar``, which only
+    launches the menu bar agent and exits.
+    """
+    from claude_swap import locking
+
+    if sys.platform != "darwin":
+        return None, False, None
+    backup_dir = Path(backup_dir)
+    lifecycle = locking.lifecycle_lock(backup_dir, timeout=_LIFECYCLE_TIMEOUT_SECONDS)
+    if not lifecycle.acquire():
+        return None, False, "another cswap is starting or stopping the backend"
+    try:
+        registration = (
+            locking.register_surface(backup_dir, kind) if kind is not None else None
+        )
+        try:
+            ensure_running(AUTO_LABEL, BACKEND_ARGS, home)
+        except (ClaudeSwitchError, OSError) as e:
+            return registration, False, str(e)
+        return registration, True, None
+    finally:
+        lifecycle.release()
+
+
+def retire_backend_if_idle(backup_dir: Path, home: Path | None = None) -> bool:
+    """The backend's own check: True when no surface is open and it should go.
+
+    Removes the backend's plist before answering, so it is not started again
+    at login. The caller then exits 0, which ``KeepAlive: {SuccessfulExit:
+    false}`` reads as "done" — launchd does not restart it. Deliberately not
+    a self-``bootout``: that has launchd SIGTERM the very process waiting on
+    ``launchctl``. The job's record stays loaded, idle, until logout or the
+    next surface's install boots it out and bootstraps afresh.
+
+    A lifecycle decision already in flight means a surface is opening: skip
+    this round rather than wait on it.
+    """
+    from claude_swap import locking
+
+    backup_dir = Path(backup_dir)
+    lifecycle = locking.lifecycle_lock(backup_dir, timeout=0.0)
+    if not lifecycle.acquire():
+        return False
+    try:
+        if locking.live_surfaces(backup_dir):
+            return False
+        plist_path(AUTO_LABEL, home).unlink(missing_ok=True)
+        return True
+    finally:
+        lifecycle.release()

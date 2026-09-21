@@ -428,59 +428,9 @@ class TestCLI:
         upgrade_fn.assert_called_once_with()
         switcher_cls.assert_not_called()
 
-    def test_menubar_flag_dispatches(self, monkeypatch):
-        called = {}
-
-        class _FakeSwitcher:
-            def __init__(self, *a, **k):
-                pass
-            def _is_running_in_container(self):
-                return False
-
-        def _fake_run(switcher):
-            called["ran"] = True
-            return 0
-
-        monkeypatch.setattr(cli, "ClaudeAccountSwitcher", _FakeSwitcher)
-        monkeypatch.setattr(sys, "argv", ["cswap", "--menubar"])
-        monkeypatch.setattr(sys, "platform", "darwin")
-        monkeypatch.setattr("claude_swap.menubar.run", _fake_run, raising=False)
-        # geteuid only exists on POSIX; ensure non-root path
-        monkeypatch.setattr(cli.os, "geteuid", lambda: 1000, raising=False)
-
-        with pytest.raises(SystemExit) as exc:
-            cli.main()
-        assert exc.value.code == 0
-        assert called.get("ran") is True
-
-    def test_menubar_subcommand_dispatches(self, monkeypatch):
-        """Bare `cswap menubar` should route exactly like `cswap --menubar`."""
-        called = {}
-
-        class _FakeSwitcher:
-            def __init__(self, *a, **k):
-                pass
-            def _is_running_in_container(self):
-                return False
-
-        def _fake_run(switcher):
-            called["ran"] = True
-            return 0
-
-        monkeypatch.setattr(cli, "ClaudeAccountSwitcher", _FakeSwitcher)
-        monkeypatch.setattr(sys, "argv", ["cswap", "menubar"])
-        monkeypatch.setattr(sys, "platform", "darwin")
-        monkeypatch.setattr("claude_swap.menubar.run", _fake_run, raising=False)
-        monkeypatch.setattr(cli.os, "geteuid", lambda: 1000, raising=False)
-
-        with pytest.raises(SystemExit) as exc:
-            cli.main()
-        assert exc.value.code == 0
-        assert called.get("ran") is True
-
-    def _service_harness(self, monkeypatch, argv):
-        """Drive `cswap menubar <service flag>` with launch_agent stubbed out."""
-        seen = {"menubar_ran": False}
+    def _menubar_harness(self, monkeypatch, argv, ensure_raises=None):
+        """Drive `cswap menubar ...` with launch_agent's launchd calls stubbed."""
+        seen = {"menubar_ran": False, "ensured": [], "opened": []}
 
         class _FakeSwitcher:
             def __init__(self, *a, **k):
@@ -493,145 +443,111 @@ class TestCLI:
             seen["menubar_ran"] = True
             return 0
 
-        def _record(name, payload):
-            def _call(*a, **k):
-                seen["called"] = name
-                return payload
+        def _open_surface(backup_dir, kind, home=None):
+            seen["opened"].append(kind)
+            return None, True, None
 
-            return _call
+        def _ensure_running(label, args, home=None, uid=None):
+            if ensure_raises is not None:
+                raise ensure_raises
+            seen["ensured"].append((label, tuple(args)))
+            return True
 
         monkeypatch.setattr(cli, "ClaudeAccountSwitcher", _FakeSwitcher)
         monkeypatch.setattr(sys, "argv", argv)
         monkeypatch.setattr(sys, "platform", "darwin")
         monkeypatch.setattr("claude_swap.menubar.run", _fake_menubar, raising=False)
+        monkeypatch.setattr(
+            "claude_swap.menubar.framework_build_warning", lambda *a: None
+        )
         monkeypatch.setattr(cli.os, "geteuid", lambda: 1000, raising=False)
-        monkeypatch.setattr(
-            "claude_swap.launch_agent.install",
-            _record(
-                "install",
-                {
-                    "label": "com.cswap.menubar",
-                    "plist": "/tmp/p.plist",
-                    "program": ["/tmp/cswap", "menubar"],
-                    "stdout_log": "/tmp/o.log",
-                    "stderr_log": "/tmp/e.log",
-                },
-            ),
-        )
-        monkeypatch.setattr(
-            "claude_swap.launch_agent.uninstall",
-            _record("uninstall", {"label": "com.cswap.menubar", "was_loaded": True, "removed_plist": True}),
-        )
-        monkeypatch.setattr(
-            "claude_swap.launch_agent.status",
-            _record(
-                "status",
-                {
-                    "label": "com.cswap.menubar",
-                    "installed": True,
-                    "loaded": True,
-                    "state": "running",
-                    "pid": 4242,
-                    "plist": "/tmp/p.plist",
-                    "program": ["/tmp/cswap", "menubar"],
-                },
-            ),
-        )
+        monkeypatch.setattr("claude_swap.launch_agent.open_surface", _open_surface)
+        monkeypatch.setattr("claude_swap.launch_agent.ensure_running", _ensure_running)
         return seen
 
-    def test_menubar_install_service_routes_to_launch_agent(self, monkeypatch, capsys):
-        seen = self._service_harness(monkeypatch, ["cswap", "menubar", "--install-service"])
-
+    def _main_exit(self):
         with pytest.raises(SystemExit) as exc:
             cli.main()
+        return exc.value.code
 
-        assert exc.value.code == 0
-        assert seen["called"] == "install"
-        # The service flags must not also start a foreground menu bar.
+    def test_menubar_foreground_runs_the_app(self, monkeypatch):
+        """`--foreground` is what the LaunchAgent runs: the app itself."""
+        seen = self._menubar_harness(monkeypatch, ["cswap", "menubar", "--foreground"])
+
+        assert self._main_exit() == 0
+        assert seen["menubar_ran"] is True
+        # The app registers and ensures the backend itself (inside run()); the
+        # CLI must not also install the menu bar agent from inside it.
+        assert seen["ensured"] == []
+
+    def test_legacy_menubar_flag_routes_like_the_subcommand(self, monkeypatch):
+        seen = self._menubar_harness(monkeypatch, ["cswap", "--menubar", "--foreground"])
+
+        assert self._main_exit() == 0
+        assert seen["menubar_ran"] is True
+
+    def test_menubar_installs_the_agent_and_returns(self, monkeypatch, capsys):
+        """Plain `cswap menubar` hands the app to launchd and gives the prompt
+        back: backend ensured first, then the agent running the foreground app."""
+        from claude_swap import launch_agent
+
+        seen = self._menubar_harness(monkeypatch, ["cswap", "menubar"])
+
+        assert self._main_exit() == 0
         assert seen["menubar_ran"] is False
-        assert "installed" in capsys.readouterr().out
+        assert seen["opened"] == [None]  # backend ensured, nothing registered
+        assert seen["ensured"] == [(launch_agent.LABEL, ("menubar", "--foreground"))]
+        assert "Menu bar started" in capsys.readouterr().out
 
-    def test_install_service_warns_when_the_interpreter_draws_nothing(
+    def test_menubar_warns_when_the_interpreter_draws_nothing(
         self, monkeypatch, capsys
     ):
-        # Installing a login service for a menu bar that cannot draw is the
-        # worst case: it survives reboots and shows nothing. See issue #310.
-        self._service_harness(monkeypatch, ["cswap", "menubar", "--install-service"])
+        # A login service for a menu bar that cannot draw is the worst case:
+        # it survives reboots and shows nothing. See issue #310.
+        self._menubar_harness(monkeypatch, ["cswap", "menubar"])
         monkeypatch.setattr(
             "claude_swap.menubar.framework_build_warning", lambda *a: "3.14 draws nothing"
         )
 
-        with pytest.raises(SystemExit):
-            cli.main()
+        self._main_exit()
 
         captured = capsys.readouterr()
         assert "3.14 draws nothing" in (captured.out + captured.err)
 
-    def test_install_service_stays_quiet_on_a_supported_interpreter(
-        self, monkeypatch, capsys
-    ):
-        self._service_harness(monkeypatch, ["cswap", "menubar", "--install-service"])
-        monkeypatch.setattr(
-            "claude_swap.menubar.framework_build_warning", lambda *a: None
+    def test_menubar_install_failure_is_an_error(self, monkeypatch, capsys):
+        from claude_swap.exceptions import ClaudeSwitchError
+
+        self._menubar_harness(
+            monkeypatch,
+            ["cswap", "menubar"],
+            ensure_raises=ClaudeSwitchError("launchctl bootstrap failed (exit 5)"),
         )
 
-        with pytest.raises(SystemExit):
-            cli.main()
+        assert self._main_exit() == 1
+        assert "bootstrap failed" in capsys.readouterr().err
 
-        captured = capsys.readouterr()
-        assert "draws nothing" not in (captured.out + captured.err)
-
-    def test_menubar_uninstall_service_routes_to_launch_agent(self, monkeypatch, capsys):
-        seen = self._service_harness(monkeypatch, ["cswap", "menubar", "--uninstall-service"])
-
-        with pytest.raises(SystemExit) as exc:
-            cli.main()
-
-        assert exc.value.code == 0
-        assert seen["called"] == "uninstall"
-        assert seen["menubar_ran"] is False
-        assert "removed" in capsys.readouterr().out
-
-    def test_menubar_service_status_reports_state_and_pid(self, monkeypatch, capsys):
-        seen = self._service_harness(monkeypatch, ["cswap", "menubar", "--service-status"])
-
-        with pytest.raises(SystemExit) as exc:
-            cli.main()
-
-        assert exc.value.code == 0
-        assert seen["called"] == "status"
-        out = capsys.readouterr().out
-        assert "running" in out and "4242" in out
-
-    def test_menubar_service_flags_still_refuse_off_macos(self, monkeypatch):
-        self._service_harness(monkeypatch, ["cswap", "menubar", "--install-service"])
+    def test_menubar_refuses_off_macos(self, monkeypatch):
+        seen = self._menubar_harness(monkeypatch, ["cswap", "menubar"])
         monkeypatch.setattr(sys, "platform", "linux")
 
-        with pytest.raises(SystemExit) as exc:
-            cli.main()
+        assert self._main_exit() == 1
+        assert seen["ensured"] == []
 
-        assert exc.value.code == 1
+    @pytest.mark.parametrize(
+        "flag", ["--install-service", "--uninstall-service", "--service-status"]
+    )
+    def test_old_menubar_service_flags_are_gone(self, monkeypatch, capsys, flag):
+        """The menu bar is installed by `cswap menubar` itself now."""
+        monkeypatch.setattr(sys, "argv", ["cswap", "menubar", flag])
 
-    def test_service_flags_are_rejected_outside_menubar(self, monkeypatch, capsys):
-        # `--full` already guards this way; without a matching check
-        # `cswap list --install-service` would be accepted and silently ignored.
-        monkeypatch.setattr(sys, "argv", ["cswap", "list", "--install-service"])
+        assert self._main_exit() == 2
+        assert "unrecognized arguments" in capsys.readouterr().err
 
-        with pytest.raises(SystemExit) as exc:
-            cli.main()
+    def test_foreground_is_rejected_outside_menubar(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["cswap", "list", "--foreground"])
 
-        assert exc.value.code == 2
+        assert self._main_exit() == 2
         assert "can only be used with 'menubar'" in capsys.readouterr().err
-
-    def test_plain_menubar_does_not_touch_the_service(self, monkeypatch):
-        seen = self._service_harness(monkeypatch, ["cswap", "menubar"])
-
-        with pytest.raises(SystemExit) as exc:
-            cli.main()
-
-        assert exc.value.code == 0
-        assert seen["menubar_ran"] is True
-        assert "called" not in seen
 
 
 class TestCLICommands:
@@ -1113,6 +1029,33 @@ class TestAutoCommand:
     def test_loop_mode_returns_loop_exit(self, temp_home):
         assert self._run([], temp_home) == 0
         assert self.FakeEngine.instances  # loop path constructed the engine
+
+    def test_only_the_backend_agent_watches_for_retirement(self, temp_home):
+        """A hand-run `cswap auto` is the user's loop; it never quits itself."""
+        started = []
+        with patch.object(cli, "_retire_when_idle", lambda *a: started.append(a)):
+            self._run([], temp_home)
+            assert started == []
+            self._run(["--backend"], temp_home)
+        assert len(started) == 1
+        assert started[0][0] is self.FakeEngine.instances[-1]
+
+    def test_backend_stops_its_engine_once_no_surface_is_open(self, monkeypatch):
+        answers = iter([False, False, True])
+        stopped = []
+
+        class _Engine:
+            def stop(self):
+                stopped.append(True)
+
+        monkeypatch.setattr(cli, "_RETIRE_GRACE_SECONDS", 0)
+        monkeypatch.setattr(cli, "_RETIRE_CHECK_SECONDS", 0)
+        monkeypatch.setattr(
+            "claude_swap.launch_agent.retire_backend_if_idle",
+            lambda _dir: next(answers),
+        )
+        cli._retire_when_idle(_Engine(), Path("/unused"))
+        assert stopped == [True]
 
     def test_flags_override_settings_json(self, temp_home):
         from claude_swap.paths import get_backup_root
@@ -1874,20 +1817,13 @@ class TestServiceCommand:
             cli.main()
         return exc.value.code
 
-    def test_install_routes_to_the_backend_label(self, monkeypatch, capsys, temp_home):
+    @pytest.mark.parametrize("verb", ["install", "uninstall"])
+    def test_install_and_uninstall_are_gone(self, monkeypatch, capsys, temp_home, verb):
+        """The TUI and the menu bar start the backend; it retires on its own."""
         seen = self._stub_launch_agent(monkeypatch)
-        assert self._run(monkeypatch, ["cswap", "service", "install"]) == 0
-        assert seen["install"]["label"] == "com.cswap.auto"
-        assert seen["install"]["args"] == ("auto", "--json")
-        out = capsys.readouterr().out
-        assert "installed" in out
-        assert "autoswitch.enabled" in out  # installing is not the opt-in
-
-    def test_uninstall_routes_to_the_backend_label(self, monkeypatch, capsys, temp_home):
-        seen = self._stub_launch_agent(monkeypatch)
-        assert self._run(monkeypatch, ["cswap", "service", "uninstall"]) == 0
-        assert seen["uninstall"]["label"] == "com.cswap.auto"
-        assert "removed" in capsys.readouterr().out
+        assert self._run(monkeypatch, ["cswap", "service", verb]) == 2
+        assert "invalid choice" in capsys.readouterr().err
+        assert "install" not in seen and "uninstall" not in seen
 
     def test_status_reports_program_path_and_engine_lock(
         self, monkeypatch, capsys, temp_home
@@ -1925,7 +1861,7 @@ class TestServiceCommand:
         )
         assert self._run(monkeypatch, ["cswap", "service", "status"]) == 0
         out = capsys.readouterr().out
-        assert "not installed" in out
+        assert "not running" in out
         assert "not held" in out  # reported even with no service installed
 
     def test_bare_service_is_status(self, monkeypatch, capsys, temp_home):

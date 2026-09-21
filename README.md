@@ -183,7 +183,6 @@ This will update the stored credentials without creating a duplicate.
 ```bash
 cswap run 2                     # Run an account in this terminal only (session mode)
 cswap auto                      # Auto-switch when nearing rate limits (see above)
-cswap service install           # Run that engine as a background launchd agent (macOS)
 cswap service status            # Is the backend running, and which build launchd holds
 cswap service logs -f           # Follow the backend's event stream
 cswap config                    # Show or edit settings (see Configuration below)
@@ -249,17 +248,11 @@ uv tool install 'claude-swap[menubar]'   # or: pipx install 'claude-swap[menubar
 cswap menubar
 ```
 
-Shows every account's 5h / 7d / spend usage and switches with a click (specific / rotate / best / next-available), plus the TUI's add / disable-enable / remove / refresh actions. Enable *Settings → Auto-switch accounts* to run the same engine as [`cswap auto`](#automatic-switching) in the background; it shares the `autoswitch.*` settings, so the menu bar and CLI stay in sync. Off until you turn it on.
+Shows every account's 5h / 7d / spend usage and switches with a click (specific / rotate / best / next-available), plus the TUI's add / disable-enable / remove / refresh actions. Enable *Settings → Auto-switch accounts* to turn on the same engine as [`cswap auto`](#automatic-switching); it shares the `autoswitch.*` settings, so the menu bar, the TUI and the CLI stay in sync. Off until you turn it on.
 
-**Keep it running without a terminal.** `cswap menubar` runs in the foreground, so the status item dies with the terminal that started it and does not come back after a reboot. `--install-service` hands it to launchd instead — starts at login, restarts on crash, no `.app` bundle:
+`cswap menubar` hands the menu bar to launchd and returns the prompt: it starts at login from then on and restarts on crash, with no `.app` bundle. *Quit* in its menu closes it until the next login. The engine runs in a small background process that the menu bar and the TUI start on their own and that stops once both are closed; `cswap service status` and `cswap service logs -f` show it.
 
-```bash
-cswap menubar --install-service     # start now, and at every login
-cswap menubar --service-status      # installed? loaded? pid?
-cswap menubar --uninstall-service   # stop it and remove the plist
-```
-
-The agent lives at `~/Library/LaunchAgents/com.cswap.menubar.plist` and logs to `~/Library/Logs/com.cswap.menubar.{log,err}`. It pins the `cswap` console script, whose path survives an upgrade — but the running process keeps the old build until it restarts, so after `cswap upgrade` either re-run `--install-service` or `launchctl kickstart -k gui/$(id -u)/com.cswap.menubar`.
+The agent lives at `~/Library/LaunchAgents/com.cswap.menubar.plist` and logs to `~/Library/Logs/com.cswap.menubar.{log,err}`. It pins the `cswap` console script, whose path survives an upgrade — but the running process keeps the old build until it restarts, so after `cswap upgrade` run `launchctl kickstart -k gui/$(id -u)/com.cswap.menubar`.
 
 </details>
 

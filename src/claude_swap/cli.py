@@ -651,7 +651,6 @@ Examples:
   cswap auto --json                # one JSON event per line (for scripts)
   cswap auto --once; echo $?       # single tick, outcome in exit code
   cswap auto --dry-run             # log decisions, never actually switch
-  cswap service install            # run the engine as a launchd agent (macOS)
 
 Switching is opt-in: until autoswitch.enabled is true the engine polls,
 evaluates and reports, but never moves the active account. Turn it on with
@@ -756,6 +755,15 @@ Defaults live in settings.json in the backup root; flags override them.
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    # Set only in the backend LaunchAgent's own argv (launch_agent.
+    # BACKEND_ARGS): retire once no TUI or menu bar is open. Hidden, because
+    # a hand-run `cswap auto` is the user's own loop and must never quit on
+    # its own.
+    parser.add_argument(
+        "--backend",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--debug",
         action="store_true",
@@ -818,6 +826,14 @@ Defaults live in settings.json in the backup root; flags override them.
 
         # Loop mode: SIGTERM (systemd stop) exits the loop cleanly.
         signal.signal(signal.SIGTERM, lambda *_: engine.stop())
+        if args.backend:
+            import threading
+
+            threading.Thread(
+                target=_retire_when_idle,
+                args=(engine, switcher.backup_dir),
+                daemon=True,
+            ).start()
         if not args.json:
             print(
                 dimmed(
@@ -843,6 +859,37 @@ Defaults live in settings.json in the backup root; flags override them.
             file=sys.stderr if args.json else sys.stdout,
         )
         sys.exit(130)
+
+
+# The backend's retirement check runs on its own short timer rather than per
+# engine tick: a blocked engine can sleep for hours, and a backend nobody is
+# looking at should be gone within seconds of the last surface closing. The
+# grace covers `cswap menubar`, which starts the backend and then the menu
+# bar agent — the menu bar registers only once launchd has it running.
+_RETIRE_GRACE_SECONDS = 30.0
+_RETIRE_CHECK_SECONDS = 5.0
+
+
+def _retire_when_idle(engine, backup_dir: Path) -> None:
+    """Stop ``engine`` once no surface is open (the backend agent only).
+
+    The loop then returns 0 and the process exits cleanly, which launchd's
+    ``KeepAlive: {SuccessfulExit: false}`` does not restart; the plist is
+    already gone (see ``launch_agent.retire_backend_if_idle``).
+    """
+    import time as _time
+
+    from claude_swap import launch_agent
+
+    _time.sleep(_RETIRE_GRACE_SECONDS)
+    while True:
+        try:
+            if launch_agent.retire_backend_if_idle(backup_dir):
+                engine.stop()
+                return
+        except Exception:
+            pass  # a failed check keeps the backend up; the next one retries
+        _time.sleep(_RETIRE_CHECK_SECONDS)
 
 
 def _config_command(argv: list[str]) -> None:
@@ -1015,102 +1062,64 @@ def _use_native_tls() -> None:
         pass
 
 
-def _menubar_service(args) -> int:
-    """Handle ``menubar --install-service|--uninstall-service|--service-status``.
+def _menubar_start() -> int:
+    """``cswap menubar``: hand the menu bar to launchd and return the prompt.
 
-    Split out of the dispatch chain because these three share one import and
-    one output shape, and because the menu bar branch below them is a
-    non-returning call — folding the service paths inline would leave the
-    reader tracing which branches fall through to launching the app.
+    The foreground app is ``cswap menubar --foreground``, which is what the
+    LaunchAgent runs. Installing it here means it also starts at every login
+    until quit from its own menu, and a crash is restarted. The backend is
+    ensured first so the menu bar opens onto a running engine; the menu bar
+    ensures it again itself when it starts, which is what brings the backend
+    back at login.
     """
     from claude_swap import launch_agent
+    from claude_swap.menubar import framework_build_warning
 
-    if args.install_service:
-        # Installing a service for a menu bar that this interpreter cannot draw
-        # is the worst version of the bug: it survives reboots and shows
-        # nothing. Say so here too, not only when the menu bar is launched.
-        from claude_swap.menubar import framework_build_warning
-
-        unsupported = framework_build_warning()
-        result = launch_agent.install()
-        print(f"Menu bar service installed ({result['label']}).")
-        print(f"  plist:   {result['plist']}")
-        print(f"  program: {' '.join(result['program'])}")
-        print(f"  logs:    {result['stderr_log']}")
-        print(
-            dimmed(
-                "It starts at login from now on. Re-run this after a cswap "
-                "upgrade to point launchd at the new build."
-            )
-        )
-        if unsupported:
-            # The hint printed above is about upgrades. A reinstall does not
-            # restart the service that is already running, so say that here.
-            warning(
-                unsupported + "\n  Then run: cswap menubar --install-service",
-                file=sys.stderr,
-            )
-        return 0
-
-    if args.uninstall_service:
-        result = launch_agent.uninstall()
-        if result["was_loaded"] or result["removed_plist"]:
-            print("Menu bar service removed.")
-        else:
-            print("Menu bar service was not installed.")
-        return 0
-
-    result = launch_agent.status()
-    if not result["installed"] and not result["loaded"]:
-        print("Menu bar service is not installed.")
-        print(dimmed("Install it with: cswap menubar --install-service"))
-        return 0
-    state = result["state"] or ("loaded" if result["loaded"] else "stopped")
-    pid = f" (pid {result['pid']})" if result["pid"] else ""
-    print(f"Menu bar service: {state}{pid}")
-    print(f"  plist:   {result['plist']}")
-    if result["program"]:
-        print(f"  program: {' '.join(result['program'])}")
-    if not result["installed"]:
-        print(dimmed("launchd still has it loaded, but the plist is gone."))
+    # A login service for a menu bar this interpreter cannot draw is the worst
+    # version of the bug: it survives reboots and shows nothing. Say so here,
+    # where someone is watching, not only in the agent's log.
+    unsupported = framework_build_warning()
+    _, _, backend_error = launch_agent.open_surface(paths.get_backup_root(), None)
+    if backend_error:
+        warning(f"Backend not started: {backend_error}", file=sys.stderr)
+    restarted = launch_agent.ensure_running(launch_agent.LABEL, launch_agent.MENUBAR_ARGS)
+    print("Menu bar started." if restarted else "Menu bar is already running.")
+    print(dimmed("It starts at login from now on; Quit from its menu closes it."))
+    if unsupported:
+        warning(unsupported, file=sys.stderr)
     return 0
 
 
 def _service_command(argv: list[str]) -> None:
-    """Handle `cswap service [install|uninstall|status|logs]`.
+    """Handle `cswap service [status|logs]`.
 
     Pre-dispatched before the main parser is built, like `run`, `auto` and
     `config` (same limitation: `service` must be the first argument). The
     backend is one headless process owning the auto-switch engine; the menu
-    bar, the TUI and the widget read what it writes. `cswap auto` stays the
-    foreground / --once engine for cron and debugging — it is no longer the
-    thing you install.
+    bar, the TUI and the widget read what it writes. Nobody installs it:
+    opening the TUI or the menu bar starts it, and it retires once the last
+    of them closes. This command only looks at it.
     """
     parser = argparse.ArgumentParser(
         prog="cswap service",
         description=(
-            "Manage the backend LaunchAgent: one headless process that polls, "
+            "Inspect the backend LaunchAgent: one headless process that polls, "
             "maintains the store, publishes the snapshot and applies the "
-            "auto-switch policy (macOS)."
+            "auto-switch policy (macOS). It runs while the TUI or the menu "
+            "bar is open."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  cswap service install       # start now, and at every login
   cswap service status        # running? which build? who holds the engine?
   cswap service logs -f       # follow the event stream
-  cswap service uninstall     # stop it and remove the plist
 
-Installing the backend is not the same as opting into automatic switching:
-until autoswitch.enabled is true it polls, evaluates and reports only. Turn
-it on with `cswap config set autoswitch.enabled true`.
+A running backend is not the same as opting into automatic switching: until
+autoswitch.enabled is true it polls, evaluates and reports only. Turn it on
+with `cswap config set autoswitch.enabled true`.
         """,
     )
-    sub = parser.add_subparsers(
-        dest="action", metavar="{install,uninstall,status,logs}"
-    )
-    sub.add_parser("install", help="Install and start the backend LaunchAgent")
-    sub.add_parser("uninstall", help="Stop the backend and remove its plist")
+    sub = parser.add_subparsers(dest="action", metavar="{status,logs}")
     sub.add_parser("status", help="Is it running, and which build is launchd holding")
     p_logs = sub.add_parser("logs", help="Tail the backend's event stream")
     p_logs.add_argument(
@@ -1131,10 +1140,6 @@ it on with `cswap config set autoswitch.enabled true`.
     action = args.action or "status"
 
     try:
-        if action == "install":
-            sys.exit(_service_install())
-        if action == "uninstall":
-            sys.exit(_service_uninstall())
         if action == "logs":
             sys.exit(_service_logs(args.lines, args.follow))
         sys.exit(_service_status())
@@ -1147,6 +1152,8 @@ it on with `cswap config set autoswitch.enabled true`.
 
 
 def _service_install() -> int:
+    """Install the backend by hand — only the deprecated ``auto
+    --install-service`` still does this (see ``_auto_service``)."""
     from claude_swap import launch_agent
     from claude_swap.settings import load_settings
 
@@ -1196,8 +1203,8 @@ def _service_status() -> int:
 
     result = launch_agent.status(label=launch_agent.AUTO_LABEL)
     if not result["installed"] and not result["loaded"]:
-        print("Backend service is not installed.")
-        print(dimmed("Install it with: cswap service install"))
+        print("Backend service is not running.")
+        print(dimmed("It starts with the TUI ('cswap') or the menu bar ('cswap menubar')."))
     else:
         state = result["state"] or ("loaded" if result["loaded"] else "stopped")
         pid = f" (pid {result['pid']})" if result["pid"] else ""
@@ -1241,7 +1248,7 @@ def _service_logs(lines: int, follow: bool) -> int:
     out_log, err_log = launch_agent.log_paths(launch_agent.AUTO_LABEL)
     if not out_log.exists():
         print(f"No backend log at {out_log}.")
-        print(dimmed("Install the service first: cswap service install"))
+        print(dimmed("The backend starts with the TUI ('cswap') or the menu bar ('cswap menubar')."))
         return 1
     print(dimmed(f"{out_log}  (crashes land in {err_log})"))
     with out_log.open("r", encoding="utf-8", errors="replace") as fh:
@@ -1279,21 +1286,22 @@ def _render_log_line(line: str) -> str:
 def _auto_service(args) -> int:
     """Deprecated ``auto --install-service|--uninstall-service|--service-status``.
 
-    These moved to ``cswap service``: the backend is a service, not a policy.
     Kept working (with a pointer on stderr) rather than removed, because the
     old spelling is in the scripts, aliases and shell history of everyone
     running the published package — an argparse "unrecognized argument" is a
-    worse answer than doing the job and saying where it lives now.
+    worse answer than doing the job and saying where it lives now. Install
+    and uninstall have no new spelling: the TUI and the menu bar start the
+    backend themselves.
     """
-    flag, verb, action = (
-        ("--install-service", "install", _service_install)
+    flag, replacement, action = (
+        ("--install-service", "open 'cswap' or 'cswap menubar'", _service_install)
         if args.install_service
-        else ("--uninstall-service", "uninstall", _service_uninstall)
+        else ("--uninstall-service", "close the TUI and the menu bar", _service_uninstall)
         if args.uninstall_service
-        else ("--service-status", "status", _service_status)
+        else ("--service-status", "use 'cswap service status'", _service_status)
     )
     warning(
-        f"'cswap auto {flag}' is deprecated; use 'cswap service {verb}'",
+        f"'cswap auto {flag}' is deprecated; {replacement} instead",
         file=sys.stderr,
     )
     return action()
@@ -1395,9 +1403,7 @@ Commands:
   %(prog)s import <path>              import accounts
   %(prog)s tui                        interactive dashboard (also: bare %(prog)s)
   %(prog)s watch                      dashboard, opened on the live watch page
-  %(prog)s menubar                    macOS menu bar app
-  %(prog)s menubar --install-service  keep the menu bar running via launchd
-  %(prog)s service install            run the backend engine via launchd
+  %(prog)s menubar                    macOS menu bar app (starts at login)
   %(prog)s service status             is the backend running, and which build
   %(prog)s upgrade                    self-upgrade to latest
   %(prog)s purge                      remove all claude-swap data
@@ -1504,26 +1510,12 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         action="store_true",
         help="Include full ~/.claude.json in export (default: oauthAccount only)",
     )
+    # What the menu bar LaunchAgent runs (launch_agent.MENUBAR_ARGS). Plain
+    # `cswap menubar` hands the app to launchd and returns; this is the app.
     parser.add_argument(
-        "--install-service",
+        "--foreground",
         action="store_true",
-        help=(
-            "With 'menubar': install a launchd LaunchAgent so the menu bar "
-            "starts at login and restarts on crash (macOS)"
-        ),
-    )
-    parser.add_argument(
-        "--uninstall-service",
-        action="store_true",
-        help="With 'menubar': stop the LaunchAgent and remove its plist (macOS)",
-    )
-    parser.add_argument(
-        "--service-status",
-        action="store_true",
-        help=(
-            "With 'menubar': report whether the LaunchAgent is installed "
-            "and running"
-        ),
+        help=argparse.SUPPRESS,
     )
 
     # Legacy `--flag` interface. Still fully supported (bare subcommands rewrite
@@ -1683,13 +1675,8 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
     if args.full and not args.export:
         parser.error("--full can only be used with 'export'")
 
-    if (
-        args.install_service or args.uninstall_service or args.service_status
-    ) and not args.menubar:
-        parser.error(
-            "--install-service, --uninstall-service and --service-status "
-            "can only be used with 'menubar'"
-        )
+    if args.foreground and not args.menubar:
+        parser.error("--foreground can only be used with 'menubar'")
 
     # Self-upgrade runs before switcher init so we don't touch config/keychain
     # just to upgrade the tool itself.
@@ -1787,8 +1774,8 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
             if sys.platform != "darwin":
                 error("The menu bar is only available on macOS.")
                 sys.exit(1)
-            if args.install_service or args.uninstall_service or args.service_status:
-                sys.exit(_menubar_service(args))
+            if not args.foreground:
+                sys.exit(_menubar_start())
             # menubar is import-safe without the extra; a missing rumps
             # surfaces from run() as a ClaudeSwitchError with the install hint.
             from claude_swap.menubar import run as menubar_run

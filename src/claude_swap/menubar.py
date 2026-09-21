@@ -546,7 +546,8 @@ def framework_build_warning(
 
 
 def run(switcher) -> int:
-    """Entry point for ``cswap --menubar``. Blocks until the user quits."""
+    """Entry point for ``cswap menubar --foreground`` — what the LaunchAgent
+    runs. Blocks until the user quits."""
     ensure_notification_identity()
     _warn = framework_build_warning()
     if _warn:
@@ -579,6 +580,16 @@ def run(switcher) -> int:
     from claude_swap.autoswitch import AutoSwitchEngine, BackendEventLog
     from claude_swap.settings import load_settings, set_setting
     from claude_swap.snapshot_source import SnapshotSource
+
+    # A surface of the backend, like the TUI: register, then make sure the
+    # backend runs. At login this is what brings the backend back. The
+    # registration lives as long as this process — Quit is a clean exit, and
+    # the backend retires on its own once no surface is left.
+    _registration, backend_managed, backend_error = launch_agent.open_surface(
+        switcher.backup_dir, "menubar"
+    )
+    if backend_error:
+        warning(f"Backend not started: {backend_error}", file=sys.stderr)
 
     settings_path = switcher.backup_dir / "menubar_settings.json"
     log_path = switcher.backup_dir / "claude-swap.log"
@@ -626,6 +637,10 @@ def run(switcher) -> int:
             self.refresh_async()  # first display fetch
             if self._auto_enabled():
                 self._start_engine()
+            elif backend_managed:
+                # The backend runs whether or not switching is on; name it in
+                # the Settings submenu instead of "not running".
+                self._refresh_owner()
 
         # ---- display refresh plumbing ----------------------------------------
         def refresh_async(self, full=False):
@@ -718,6 +733,10 @@ def run(switcher) -> int:
             holds the lock and this app's engine has already been refused.
             """
             self._owner = launch_agent.engine_owner(self.switcher.backup_dir)
+            if self._owner[0] == launch_agent.ENGINE_NONE and backend_managed:
+                # Started but not yet holding the lock: it is still the
+                # owner, and an engine here would steal its lock.
+                self._owner = (launch_agent.ENGINE_BACKEND, "")
             if self._owner[0] == launch_agent.ENGINE_BACKEND:
                 if self._backend_log is None:
                     # backfill=0: replaying yesterday's switches as macOS

@@ -6,6 +6,10 @@ design; this is the runbook.
 Everything below uses **`.venv/bin/cswap`** — the dev checkout, v0.27.0b1. Your
 global `~/.local/bin/cswap` is v0.26.0 and predates all of this.
 
+One-time setup: `uv sync --extra menubar`. After that there is nothing to
+install by hand — `cswap` is the only entry point, and the TUI and the menu bar
+start the backend themselves.
+
 ---
 
 ## 0. Clear the decks
@@ -29,11 +33,11 @@ Optionally remove the global install entirely for the duration:
 
 ---
 
-## 1. Install the backend
+## 1. Start the backend by opening a surface
 
 ```bash
 cd ~/src/claude-swap
-./src/start-service              # no argument = the backend
+.venv/bin/cswap tui              # leave it open; in another terminal:
 .venv/bin/cswap service status
 ```
 
@@ -43,10 +47,21 @@ Expect the service loaded, a pid, and two lines that did not exist before:
   dev-checkout-vs-global-install collision made visible. It must point at
   `.venv/bin/cswap`, not `~/.local/bin/cswap`.
 - `engine:` — the lock holder.
+- the plist's program ends in `auto --json --backend`.
 
-**This path has never been run live.** The harness blocked `launchctl
-bootstrap` for every agent, so `service install`/`uninstall` are covered only by
-unit tests with a stubbed `launch_agent`. If something is broken, it is most
+`ls ~/.claude-swap-backup/.surfaces/` shows one `tui-<pid>.lock` per open
+surface.
+
+### Last one out
+
+Close the TUI. Within ~5s (30s if the backend started less than 30s ago) the
+backend should delete `~/Library/LaunchAgents/com.cswap.auto.plist` and exit 0;
+`service status` then shows it not running. It does this whatever
+`autoswitch.enabled` says. Kill a TUI with `kill -9` instead and the result
+must be the same — a dead surface's lock is released by the kernel.
+
+**Self-retirement has never been run live against launchd**; it is covered by
+unit tests with stubbed `launch_agent`. If something is broken, it is most
 likely here.
 
 ### Confirm it is actually ticking
@@ -79,10 +94,11 @@ pid NNNNN (/Users/ferhan/src/claude-swap/.venv/bin/cswap auto)
 — not starting a second one
 ```
 
-Then stop the service and confirm the same command now ticks normally:
+Then close every surface, wait for the backend to retire, and confirm the same
+command now ticks normally:
 
 ```bash
-./src/stop-service
+.venv/bin/cswap service status                   # not running
 .venv/bin/cswap auto --once ; echo "exit=$?"     # exit 2 = no switch needed
 ```
 
@@ -98,12 +114,12 @@ fool anything:
 
 ## 3. Surfaces as clients
 
-Start the backend again, then open each surface and check the **engine
+Open each surface (which starts the backend) and check the **engine
 ownership** display. Three states must be distinguishable:
 
 | Situation | TUI badge | Menu bar (Settings submenu) |
 |---|---|---|
-| backend running | `BACKEND` | `Engine: backend service` |
+| backend running | `BACKEND` (`BACKEND · LIVE` with `autoswitch.enabled`) | `Engine: backend service` |
 | hand-run `cswap auto` in a terminal | `EXTERNAL` | `Engine: pid N (…)` |
 | nothing else running | `LIVE` / `DRY-RUN` | `Engine: this menu bar` |
 | nothing at all | — | `Engine: not running` |
@@ -114,16 +130,21 @@ logging the lock refusal. If you see that, it regressed.
 
 ```bash
 .venv/bin/cswap                       # TUI, then open the auto screen
-./src/start-service menubar           # menu bar, separately
+.venv/bin/cswap menubar               # installs the menu bar agent and returns
 ```
+
+In the TUI's auto screen with the backend owning the engine, `l` toggles
+`autoswitch.enabled` (confirmed when going live) instead of restarting a local
+engine. Menu bar *Quit* is a clean exit: the plist stays, so it returns at the
+next login, and the backend retires if no TUI is open.
 
 With the backend running, the surfaces must show its events rather than
 producing their own — switches and quarantines from the backend should appear
 in the TUI auto screen and as menu bar notifications.
 
-**Self-hosting must still work.** With no backend and nothing holding the lock,
-each surface starts its own engine exactly as before. This did not become
-"requires the service".
+**Self-hosting is now the fallback only.** On macOS a surface hosts its own
+engine only if starting the backend failed (the auto screen says why). Off
+macOS there is no backend and the TUI hosts its engine as before.
 
 ---
 
@@ -210,7 +231,7 @@ strays with `pluginkit -r <path>`.
 
 ## Known gaps — expect these, they are not regressions
 
-- **launchd install/uninstall was never run live.** Highest-risk area.
+- **Backend self-retirement was never run live.** Highest-risk area.
 - **Every rumps-bound menu bar path is untested.** `MenuBarApp` is defined
   inside `run()` and needs a live NSApp, so there is no harness. The pure
   helpers it composes are tested; the wiring is reviewed, not executed.
@@ -228,8 +249,12 @@ strays with `pluginkit -r <path>`.
 
 ## Teardown
 
+Close the TUI and *Quit* the menu bar; the backend retires on its own. The menu
+bar plist stays (it returns at login) — there is no command to remove it; do it
+by hand if needed:
+
 ```bash
-./src/stop-service                    # backend
-./src/stop-service menubar            # menu bar, if installed
+launchctl bootout gui/$(id -u)/com.cswap.menubar
+rm -f ~/Library/LaunchAgents/com.cswap.menubar.plist
 ./widget/build-widget uninstall       # widget
 ```

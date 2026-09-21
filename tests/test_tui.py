@@ -1482,6 +1482,76 @@ class TestAutoScreen:
             assert fake_engine.instances[0].stopped is True
             assert fake_engine.instances[1].dry_run is False
 
+    async def test_a_just_started_backend_is_the_owner_before_it_locks(
+        self, tmp_path, fake_engine
+    ):
+        """The TUI started the backend; it has not taken the engine lock yet.
+        Hosting an engine in that window would steal the lock from it."""
+        from claude_swap.tui.app import CswapApp
+
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2)], tmp_path
+        )
+        app = CswapApp(fake, backend_managed=True)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await self._open(pilot)
+            from textual.widgets import Static
+
+            assert fake_engine.instances == []
+            assert app.screen._owner == launch_agent.ENGINE_BACKEND
+            badge = app.screen.query_one("#mode-badge", Static)
+            assert "BACKEND" in badge.render().plain
+
+    async def test_live_toggle_drives_autoswitch_enabled_for_the_backend(
+        self, tmp_path, fake_engine
+    ):
+        from claude_swap.settings import load_settings
+        from claude_swap.tui.app import CswapApp
+        from claude_swap.tui.modals import ConfirmModal
+
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2)], tmp_path
+        )
+        app = CswapApp(fake, backend_managed=True)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await self._open(pilot)
+            from textual.widgets import Static
+
+            await pilot.press("l")
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmModal)  # going live is confirmed
+            await pilot.press("y")
+            await settle(pilot)
+            assert load_settings(tmp_path).enabled is True
+            badge = app.screen.query_one("#mode-badge", Static)
+            assert "LIVE" in badge.render().plain
+
+            await pilot.press("l")  # back to poll-only: no confirmation
+            await settle(pilot)
+            assert load_settings(tmp_path).enabled is False
+            assert "LIVE" not in badge.render().plain
+            assert fake_engine.instances == []  # never hosted one
+
+    async def test_falls_back_to_hosting_when_the_backend_failed(
+        self, tmp_path, fake_engine
+    ):
+        from claude_swap.tui.app import CswapApp
+
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2)], tmp_path
+        )
+        app = CswapApp(fake, backend_managed=False, backend_error="exit 5")
+        async with app.run_test(size=(100, 40)) as pilot:
+            await self._open(pilot)
+            from textual.widgets import RichLog
+
+            assert len(fake_engine.instances) == 1
+            lines = [
+                line.text
+                for line in app.screen.query_one("#event-log", RichLog).lines
+            ]
+            assert any("backend not started (exit 5)" in line for line in lines)
+
     async def test_back_stops_engine_and_restores_fetching(
         self, tmp_path, fake_engine
     ):

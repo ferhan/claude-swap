@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import types
@@ -524,6 +525,26 @@ def _isolate_real_home(request, tmp_path_factory, monkeypatch):
     monkeypatch.setenv("HOME", str(safe_home))
     monkeypatch.setenv("USERPROFILE", str(safe_home))
     monkeypatch.setattr("pathlib.Path.home", lambda: safe_home)
+
+
+@pytest.fixture(autouse=True)
+def block_real_launchctl(monkeypatch):
+    """No test may drive the real ``launchctl``.
+
+    Opening a surface (the TUI, the menu bar) now bootstraps LaunchAgents, and
+    launchd runs them with the user's real ``$HOME`` whatever this process's
+    is — one unstubbed call starts a real menu bar and backend against the
+    developer's real accounts. Tests that exercise ``launch_agent`` patch
+    ``subprocess.run`` themselves, which layers over this guard.
+    """
+    real_run = subprocess.run
+
+    def guarded(argv, *args, **kwargs):
+        if isinstance(argv, (list, tuple)) and argv and argv[0] == "launchctl":
+            raise AssertionError(f"test tried to run the real launchctl: {argv}")
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", guarded)
 
 
 @pytest.fixture(autouse=True)

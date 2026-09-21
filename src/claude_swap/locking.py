@@ -209,3 +209,61 @@ def describe_engine_holder(holder: dict) -> str:
     if pid:
         return f"pid {pid}"
     return str(program) if program else "an unidentified process"
+
+
+# -- open-surface registry ---------------------------------------------------
+
+SURFACES_DIR_NAME = ".surfaces"
+LIFECYCLE_LOCK_NAME = ".lifecycle.lock"
+
+
+def surfaces_dir(backup_dir: Path) -> Path:
+    """Where each open surface (TUI, menu bar) keeps its liveness lock."""
+    return backup_dir / SURFACES_DIR_NAME
+
+
+def lifecycle_lock(backup_dir: Path, timeout: float) -> FileLock:
+    """The lock every start-backend and stop-backend decision is made under.
+
+    Short-held. Without it, a surface can be deciding the backend is running
+    in the same instant the backend decides nobody is watching and removes
+    its own plist — and the surface opens onto a backend that is leaving.
+    """
+    return FileLock(backup_dir / LIFECYCLE_LOCK_NAME, timeout=timeout)
+
+
+def register_surface(backup_dir: Path, kind: str) -> FileLock | None:
+    """Mark this process as an open surface for as long as it lives.
+
+    One lock file per process, held until exit. The kernel drops ``flock``
+    when the holder dies, so a crashed surface stops counting at once — no
+    pid file to go stale. Callers hold :func:`lifecycle_lock` around this,
+    which is what keeps :func:`live_surfaces`' cleanup from unlinking a file
+    between another process creating it and locking it.
+    """
+    lock = FileLock(surfaces_dir(backup_dir) / f"{kind}-{os.getpid()}.lock", timeout=0.0)
+    return lock if lock.acquire() else None
+
+
+def live_surfaces(backup_dir: Path) -> list[str]:
+    """Names of the surfaces still open, deleting the files of dead ones.
+
+    Liveness is try-acquire, as for the engine lock: a file we can lock
+    belongs to a process that is gone. Call under :func:`lifecycle_lock`.
+    """
+    try:
+        candidates = sorted(surfaces_dir(backup_dir).glob("*.lock"))
+    except OSError:
+        return []
+    live = []
+    for path in candidates:
+        probe = FileLock(path, timeout=0.0)
+        if probe.acquire():
+            probe.release()
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        else:
+            live.append(path.stem)
+    return live

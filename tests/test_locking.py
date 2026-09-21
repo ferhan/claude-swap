@@ -235,3 +235,46 @@ class TestEngineLock:
         assert engine_lock_holder(path) == {}
         assert describe_engine_holder({}) == "an unidentified process"
         raw.release()
+
+
+class TestSurfaceRegistry:
+    """Open surfaces are counted by a lock each holds for its lifetime."""
+
+    def test_a_registered_surface_is_live(self, tmp_path):
+        from claude_swap.locking import live_surfaces, register_surface
+
+        reg = register_surface(tmp_path, "tui")
+        try:
+            assert live_surfaces(tmp_path) == [f"tui-{os.getpid()}"]
+        finally:
+            reg.release()
+
+    def test_a_released_surface_is_gone_and_its_file_cleaned(self, tmp_path):
+        from claude_swap.locking import live_surfaces, register_surface, surfaces_dir
+
+        register_surface(tmp_path, "menubar").release()
+        assert live_surfaces(tmp_path) == []
+        assert list(surfaces_dir(tmp_path).iterdir()) == []
+
+    def test_a_dead_process_does_not_count(self, tmp_path):
+        """flock dies with its holder, so a crash needs no cleanup to count."""
+        import subprocess
+        import sys
+        import textwrap
+
+        from claude_swap.locking import live_surfaces
+
+        script = textwrap.dedent(
+            f"""
+            from pathlib import Path
+            from claude_swap.locking import register_surface
+            assert register_surface(Path({str(tmp_path)!r}), "tui") is not None
+            """
+        )
+        subprocess.run([sys.executable, "-c", script], check=True)
+        assert live_surfaces(tmp_path) == []
+
+    def test_no_registry_directory_means_no_surfaces(self, tmp_path):
+        from claude_swap.locking import live_surfaces
+
+        assert live_surfaces(tmp_path) == []

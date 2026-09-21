@@ -50,10 +50,12 @@ def _router(responses: dict[str, subprocess.CompletedProcess]):
 # --- plist shape -----------------------------------------------------------
 
 
-def test_build_plist_is_parseable_and_runs_the_menubar_subcommand(tmp_path):
+def test_build_plist_is_parseable_and_runs_the_foreground_menubar(tmp_path):
+    # --foreground: plain `cswap menubar` installs this agent and returns, so
+    # launchd must be handed the spelling that actually runs the app.
     parsed = plistlib.loads(launch_agent.build_plist(PROGRAM, home=tmp_path))
     assert parsed["Label"] == launch_agent.LABEL
-    assert parsed["ProgramArguments"] == [*PROGRAM, "menubar"]
+    assert parsed["ProgramArguments"] == [*PROGRAM, "menubar", "--foreground"]
     assert parsed["RunAtLoad"] is True
 
 
@@ -426,15 +428,15 @@ def test_status_names_the_program_the_installed_plist_runs(tmp_path):
     """One label, two possible owners.
 
     A dev checkout and a `uv tool install` install under the SAME label, and
-    whichever ran --install-service last silently owns it. Reporting the argv
-    the plist on disk actually carries is what makes that visible.
+    whichever opened a surface last owns it. Reporting the argv the plist on
+    disk actually carries is what makes that visible.
     """
     with patch.object(launch_agent.subprocess, "run") as run:
         run.side_effect = _router({"print": _completed(1)})
         launch_agent.install(home=tmp_path, program=PROGRAM, uid=UID)
         result = launch_agent.status(home=tmp_path, uid=UID)
 
-    assert result["program"] == [*PROGRAM, "menubar"]
+    assert result["program"] == [*PROGRAM, "menubar", "--foreground"]
 
 
 def test_status_program_is_none_when_no_plist_is_installed(tmp_path):
@@ -559,3 +561,160 @@ def test_backend_pid_never_shells_out_off_macos():
          patch.object(launch_agent.subprocess, "run") as run:
         assert launch_agent.backend_pid() is None
     run.assert_not_called()
+
+
+# --- surfaces and the backend's lifetime -------------------------------------
+
+
+def _install_plist(home: Path, label: str, argv: list[str]) -> None:
+    target = launch_agent.plist_path(label, home)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(plistlib.dumps({"Label": label, "ProgramArguments": argv}))
+
+
+def _running(pid: int = 4242):
+    return _router({"print": _completed(0, stdout=f"\tstate = running\n\tpid = {pid}\n")})
+
+
+class TestNeedsInstall:
+    """Newest caller wins: the build the user just ran is the one launchd holds."""
+
+    ARGS = launch_agent.BACKEND_ARGS
+
+    def test_running_this_build_needs_nothing(self, tmp_path):
+        _install_plist(tmp_path, launch_agent.AUTO_LABEL, [*PROGRAM, *self.ARGS])
+        with patch.object(launch_agent, "resolve_program", return_value=PROGRAM):
+            with patch.object(launch_agent.subprocess, "run", side_effect=_running()):
+                assert not launch_agent.needs_install(
+                    launch_agent.AUTO_LABEL, self.ARGS, tmp_path, UID
+                )
+
+    def test_another_build_in_the_plist_is_replaced(self, tmp_path):
+        _install_plist(
+            tmp_path, launch_agent.AUTO_LABEL, ["/elsewhere/cswap", *self.ARGS]
+        )
+        with patch.object(launch_agent, "resolve_program", return_value=PROGRAM):
+            with patch.object(launch_agent.subprocess, "run", side_effect=_running()):
+                assert launch_agent.needs_install(
+                    launch_agent.AUTO_LABEL, self.ARGS, tmp_path, UID
+                )
+
+    def test_a_backend_installed_without_retirement_is_replaced(self, tmp_path):
+        # The deprecated `auto --install-service` writes `auto --json`: a
+        # backend that never retires. A surface converts it.
+        _install_plist(tmp_path, launch_agent.AUTO_LABEL, [*PROGRAM, "auto", "--json"])
+        with patch.object(launch_agent, "resolve_program", return_value=PROGRAM):
+            with patch.object(launch_agent.subprocess, "run", side_effect=_running()):
+                assert launch_agent.needs_install(
+                    launch_agent.AUTO_LABEL, self.ARGS, tmp_path, UID
+                )
+
+    def test_loaded_but_not_running_is_restarted(self, tmp_path):
+        _install_plist(tmp_path, launch_agent.AUTO_LABEL, [*PROGRAM, *self.ARGS])
+        idle = _router({"print": _completed(0, stdout="\tstate = not running\n")})
+        with patch.object(launch_agent, "resolve_program", return_value=PROGRAM):
+            with patch.object(launch_agent.subprocess, "run", side_effect=idle):
+                assert launch_agent.needs_install(
+                    launch_agent.AUTO_LABEL, self.ARGS, tmp_path, UID
+                )
+
+    def test_ensure_running_installs_only_when_needed(self, tmp_path):
+        with patch.object(launch_agent, "needs_install", return_value=False), \
+             patch.object(launch_agent, "install") as install:
+            assert launch_agent.ensure_running("x", ("a",), tmp_path, UID) is False
+        install.assert_not_called()
+        with patch.object(launch_agent, "needs_install", return_value=True), \
+             patch.object(launch_agent, "install") as install:
+            assert launch_agent.ensure_running("x", ("a",), tmp_path, UID) is True
+        install.assert_called_once_with(label="x", home=tmp_path, uid=UID, args=("a",))
+
+
+class TestOpenSurface:
+    def test_registers_then_ensures_the_backend(self, tmp_path):
+        from claude_swap import locking
+
+        seen = {}
+
+        def _ensure(label, args, home=None, uid=None):
+            # Registration comes first, so the backend's first look for
+            # surfaces always finds the one that started it.
+            seen["live"] = locking.live_surfaces(tmp_path)
+            seen["call"] = (label, tuple(args))
+            return True
+
+        with patch.object(launch_agent, "ensure_running", side_effect=_ensure):
+            registration, managed, error = launch_agent.open_surface(tmp_path, "tui")
+        try:
+            assert managed is True and error is None
+            assert seen["live"] == [f"tui-{os.getpid()}"]
+            assert seen["call"] == (launch_agent.AUTO_LABEL, launch_agent.BACKEND_ARGS)
+        finally:
+            registration.release()
+
+    def test_a_launchd_failure_still_opens_the_surface(self, tmp_path):
+        with patch.object(
+            launch_agent, "ensure_running", side_effect=ClaudeSwitchError("exit 5")
+        ):
+            registration, managed, error = launch_agent.open_surface(tmp_path, "tui")
+        try:
+            assert managed is False
+            assert error == "exit 5"
+            assert registration is not None  # still counted as open
+        finally:
+            registration.release()
+
+    def test_off_macos_there_is_no_backend(self, tmp_path):
+        with patch.object(launch_agent.sys, "platform", "linux"), \
+             patch.object(launch_agent, "ensure_running") as ensure:
+            assert launch_agent.open_surface(tmp_path, "tui") == (None, False, None)
+        ensure.assert_not_called()
+        assert not (tmp_path / ".surfaces").exists()
+
+    def test_no_kind_ensures_without_registering(self, tmp_path):
+        with patch.object(launch_agent, "ensure_running", return_value=False):
+            registration, managed, _ = launch_agent.open_surface(tmp_path, None)
+        assert registration is None and managed is True
+        assert not (tmp_path / ".surfaces").exists()
+
+
+class TestRetireBackendIfIdle:
+    """Last one out stops the backend, whatever autoswitch.enabled says."""
+
+    def test_retires_and_removes_its_plist_when_no_surface_is_open(self, tmp_path):
+        _install_plist(tmp_path, launch_agent.AUTO_LABEL, [*PROGRAM, "auto"])
+        assert launch_agent.retire_backend_if_idle(tmp_path, home=tmp_path) is True
+        # Gone from disk, so it is not started again at login.
+        assert not launch_agent.plist_path(launch_agent.AUTO_LABEL, tmp_path).exists()
+
+    def test_stays_while_a_surface_is_open(self, tmp_path):
+        from claude_swap import locking
+
+        _install_plist(tmp_path, launch_agent.AUTO_LABEL, [*PROGRAM, "auto"])
+        surface = locking.register_surface(tmp_path, "menubar")
+        try:
+            assert launch_agent.retire_backend_if_idle(tmp_path, home=tmp_path) is False
+        finally:
+            surface.release()
+        assert launch_agent.plist_path(launch_agent.AUTO_LABEL, tmp_path).exists()
+
+    def test_a_crashed_surface_does_not_keep_it_alive(self, tmp_path):
+        # A leftover file nobody holds is a surface whose process is gone.
+        from claude_swap import locking
+
+        stale = locking.surfaces_dir(tmp_path) / "tui-99999.lock"
+        stale.parent.mkdir(parents=True)
+        stale.touch()
+        assert launch_agent.retire_backend_if_idle(tmp_path, home=tmp_path) is True
+        assert not stale.exists()
+
+    def test_defers_while_a_surface_is_mid_decision(self, tmp_path):
+        from claude_swap import locking
+
+        _install_plist(tmp_path, launch_agent.AUTO_LABEL, [*PROGRAM, "auto"])
+        busy = locking.lifecycle_lock(tmp_path, timeout=0.0)
+        assert busy.acquire()
+        try:
+            assert launch_agent.retire_backend_if_idle(tmp_path, home=tmp_path) is False
+        finally:
+            busy.release()
+        assert launch_agent.plist_path(launch_agent.AUTO_LABEL, tmp_path).exists()

@@ -241,24 +241,56 @@ never switch*.
 
 ## Command surface
 
-```
-cswap service install     install and start the backend launchd agent
-cswap service uninstall   stop it and remove the plist
-cswap service status      is it running, and which build is launchd holding
-cswap service logs        tail the event stream
+`cswap` is the only entry point. Nobody installs the backend; the surfaces
+start it.
 
-cswap                     TUI
-cswap menubar             menu bar
+```
+cswap                     TUI (also `cswap tui`, `cswap watch`)
+cswap menubar             install + start the menu bar agent, return the prompt
+cswap service status      is the backend running, and which build is launchd holding
+cswap service logs        tail the event stream
 cswap widget install      build and install the widget locally
 ```
 
 `cswap auto` remains the foreground / `--once` engine for cron and debugging.
-It is no longer the thing you install.
+It is no longer the thing you install. (`cswap auto --install-service` still
+works as a hidden, deprecated alias; its backend lacks `--backend`, so it does
+not retire, until the next surface replaces it with one that does.)
 
-`cswap service status` prints the resolved program path. Both labels
-(`com.cswap.auto`, `com.cswap.menubar`) can be overwritten by either a dev
-checkout or a global `uv tool install` — the status output makes that visible,
-it does not prevent it.
+The menu bar agent runs `cswap menubar --foreground` (hidden flag); the backend
+agent runs `cswap auto --json --backend`.
+
+### Backend lifetime
+
+The backend runs exactly while some surface is open.
+
+1. A surface (TUI, or the menu bar app itself) takes the **lifecycle lock**
+   (`<backup>/.lifecycle.lock`), registers itself — a lock file
+   `<backup>/.surfaces/<kind>-<pid>.lock` held for its whole life — and
+   ensures the backend: reinstall if it isn't running or if the plist's
+   `ProgramArguments` differ from this build's (**newest caller wins**).
+   Then it releases the lifecycle lock. If launchd fails, the surface still
+   opens and falls back to hosting its own engine.
+2. The backend (only when started with `--backend`) checks every 5s, after a
+   30s startup grace, under the same lifecycle lock (try-acquire; skip the
+   round if busy): if no surface lock is held, it deletes its own plist and
+   stops its engine; the process exits 0, which `KeepAlive: {SuccessfulExit:
+   false}` does not restart. Liveness is try-acquire, so a crashed surface
+   counts as gone.
+3. It does not `bootout` itself — that would have launchd SIGTERM the process
+   waiting on `launchctl`. The job's record stays loaded but idle until
+   logout, or until the next surface's install boots it out and bootstraps.
+
+Races: registration and the retire check are serialized by the lifecycle
+lock. A surface that registers after a retire sees no plist and reinstalls;
+a retire that runs after a registration sees the surface and stays. The grace
+covers `cswap menubar`, which ensures the backend and exits before the menu
+bar app registers (the app ensures the backend again itself, which is also
+what brings it back at login).
+
+Both labels (`com.cswap.auto`, `com.cswap.menubar`) can be overwritten by
+either a dev checkout or a global `uv tool install`; `cswap service status`
+prints the program launchd holds.
 
 ## The widget
 
@@ -343,8 +375,9 @@ Built and verified:
 - `cswap snapshot` and the snapshot schema, with the golden fixture and drift
   tests on both sides
 - the widget: decoder, views, golden decode test, entitlements, signed build
-- the backend as `cswap service`, `autoswitch.enabled`, per-tick settings
-  reload, snapshot published each tick
+- the backend, started by the surfaces and retired by itself when the last
+  one closes; `autoswitch.enabled`, per-tick settings reload, snapshot
+  published each tick
 - the **singleton engine lock**, and both surfaces deciding from it rather
   than from the launchd label — this surface owns the engine / the backend
   owns it / something else does are three distinct, separately rendered states
@@ -366,7 +399,7 @@ Not built:
 
 Untested:
 
-- the launchd install end to end
+- the backend's self-retirement against a live launchd (unit-tested only)
 - whether `temporary-exception` passes real notarization (the reasoning is
   sound — it is not profile-gated, and notarization is automated scanning
   rather than the human review that scrutinizes these — but it is unproven
@@ -374,5 +407,5 @@ Untested:
 
 ## Definition of done
 
-`cswap service install`, and then the TUI, the menu bar and the widget all show
-the same live data with nothing else required.
+`cswap` or `cswap menubar`, and then the TUI, the menu bar and the widget all
+show the same live data with nothing else required.
