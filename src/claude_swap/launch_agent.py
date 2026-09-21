@@ -14,8 +14,9 @@ approach:
 outlives upgrades, and the two paths age differently: ``uv tool upgrade`` (and
 ``cswap upgrade``) rebuilds the tool's virtualenv — ``sys.executable`` points
 inside that virtualenv and can be replaced — while the console script keeps its
-path across upgrades. Pinning the script means an upgraded cswap needs a
-``launchctl kickstart``, not a reinstalled service. ``sys.executable -m
+path across upgrades. Pinning the script means the plist stays valid after an
+upgrade; the running process is still the old code, which is why the plist
+also records the version that wrote it (see ``needs_install``). ``sys.executable -m
 claude_swap`` stays as the fallback for installs that expose no console script.
 
 *Logs go to ``~/Library/Logs``, not ``/tmp``.* ``/tmp`` is world-writable and
@@ -37,6 +38,7 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
+from claude_swap import __version__
 from claude_swap.exceptions import ClaudeSwitchError
 
 LABEL = "com.cswap.menubar"
@@ -163,7 +165,14 @@ def build_plist(
             # A menu bar owner is a UI process; Background would have launchd
             # apply throttled I/O and CPU bands to it.
             "ProcessType": "Interactive",
-            "EnvironmentVariables": {"PATH": _path_env(program)},
+            # CSWAP_VERSION is read by nobody at runtime. It records which
+            # release wrote the plist, because an upgrade keeps the console
+            # script's path and so leaves ProgramArguments unchanged: without
+            # it, needs_install could not tell the running agent is old code.
+            "EnvironmentVariables": {
+                "PATH": _path_env(program),
+                "CSWAP_VERSION": __version__,
+            },
             "StandardOutPath": str(out_log),
             "StandardErrorPath": str(err_log),
         }
@@ -294,17 +303,30 @@ def status(label: str = LABEL, uid: int | None = None, home: Path | None = None)
         # on disk actually carries so which build is installed is visible
         # instead of guessed.
         "program": _plist_program(target_plist),
+        "version": _plist_version(target_plist),
     }
+
+
+def _read_plist(target_plist: Path) -> dict:
+    """The installed plist as a dict; empty if missing or unreadable."""
+    try:
+        parsed = plistlib.loads(target_plist.read_bytes())
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _plist_program(target_plist: Path) -> list[str] | None:
     """ProgramArguments of the installed plist, or None if unreadable."""
-    try:
-        parsed = plistlib.loads(target_plist.read_bytes())
-    except (OSError, plistlib.InvalidFileException, ValueError):
-        return None
-    program = parsed.get("ProgramArguments") if isinstance(parsed, dict) else None
+    program = _read_plist(target_plist).get("ProgramArguments")
     return program if isinstance(program, list) else None
+
+
+def _plist_version(target_plist: Path) -> str | None:
+    """The cswap version that wrote the plist, or None (pre-dates the tag)."""
+    env = _read_plist(target_plist).get("EnvironmentVariables")
+    version = env.get("CSWAP_VERSION") if isinstance(env, dict) else None
+    return version if isinstance(version, str) else None
 
 
 def install(
@@ -383,6 +405,30 @@ def uninstall(
     return {"label": label, "was_loaded": was_loaded, "removed_plist": existed}
 
 
+def opens_at_login(home: Path | None = None) -> bool:
+    """Whether the menu bar starts at login: its plist is on disk."""
+    return plist_path(LABEL, home).exists()
+
+
+def set_open_at_login(enabled: bool, home: Path | None = None) -> None:
+    """The menu bar's "Open at Login" item: write or delete its plist only.
+
+    No ``launchctl`` either way. Called from inside the running menu bar, and
+    a self-``bootout`` would have launchd SIGTERM the very process waiting on
+    it. The loaded job is left alone, so the app keeps running this session:
+    turning it off takes effect at the next login (or when Quit exits it for
+    good); turning it on writes the plist launchd reads at login. The
+    CLI's ``cswap menubar --uninstall-service`` is the stop-it-now path.
+    """
+    _require_macos()
+    target = plist_path(LABEL, home)
+    if not enabled:
+        target.unlink(missing_ok=True)
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(build_plist(label=LABEL, home=home, args=MENUBAR_ARGS))
+
+
 # -- surfaces and the backend's lifetime --------------------------------------
 #
 # The backend runs exactly while some surface is open. A surface registers
@@ -403,9 +449,18 @@ def needs_install(
     True when it isn't running, or when the plist on disk carries a different
     argv — another checkout or install put it there, and the newest caller
     wins, so the build the user just ran is the one launchd holds.
+
+    Also true when the plist was written by another cswap version. An upgrade
+    (``cswap upgrade``, ``uv tool upgrade``) keeps the console script's path,
+    so the argv still matches while the running agent is the old code; the
+    reinstall's bootout + bootstrap is what restarts it on the new code.
     """
     current = status(label, uid, home)
-    return current["pid"] is None or current["program"] != [*resolve_program(), *args]
+    return (
+        current["pid"] is None
+        or current["program"] != [*resolve_program(), *args]
+        or current["version"] != __version__
+    )
 
 
 def ensure_running(

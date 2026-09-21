@@ -533,9 +533,33 @@ class TestCLI:
         assert self._main_exit() == 1
         assert seen["ensured"] == []
 
-    @pytest.mark.parametrize(
-        "flag", ["--install-service", "--uninstall-service", "--service-status"]
-    )
+    def test_menubar_uninstall_service_closes_it_for_good(self, monkeypatch, capsys):
+        """The one way to stop the menu bar returning at login from a shell:
+        bootout + delete its plist, and nothing else — no backend ensure, no
+        menu bar reinstall. The backend retires on its own."""
+        from claude_swap import launch_agent
+
+        seen = self._menubar_harness(monkeypatch, ["cswap", "menubar", "--uninstall-service"])
+        removed = []
+        monkeypatch.setattr(
+            "claude_swap.launch_agent.uninstall",
+            lambda label: removed.append(label)
+            or {"label": label, "was_loaded": True, "removed_plist": True},
+        )
+
+        assert self._main_exit() == 0
+        assert removed == [launch_agent.LABEL]
+        assert seen["opened"] == [] and seen["ensured"] == []
+        assert seen["menubar_ran"] is False
+        assert "will not open at login" in capsys.readouterr().out
+
+    def test_uninstall_service_needs_menubar(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["cswap", "list", "--uninstall-service"])
+
+        assert self._main_exit() == 2
+        assert "only be used with 'menubar'" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("flag", ["--install-service", "--service-status"])
     def test_old_menubar_service_flags_are_gone(self, monkeypatch, capsys, flag):
         """The menu bar is installed by `cswap menubar` itself now."""
         monkeypatch.setattr(sys, "argv", ["cswap", "menubar", flag])
@@ -989,8 +1013,10 @@ class TestAutoCommand:
 
             return type(self).tick_outcome or TickOutcome.NO_ACTION
 
+        loop_code = 0  # 1 = run_loop refused: another engine holds the lock
+
         def run_loop(self):
-            return 0
+            return type(self).loop_code
 
         def stop(self):
             pass
@@ -999,6 +1025,7 @@ class TestAutoCommand:
     def _fresh_fake(self):
         self.FakeEngine.instances = []
         self.FakeEngine.tick_outcome = None
+        self.FakeEngine.loop_code = 0
 
     def _run(self, argv: list[str], temp_home):
         with patch("claude_swap.autoswitch.AutoSwitchEngine", self.FakeEngine), \
@@ -1039,6 +1066,18 @@ class TestAutoCommand:
             self._run(["--backend"], temp_home)
         assert len(started) == 1
         assert started[0][0] is self.FakeEngine.instances[-1]
+
+    def test_a_refused_backend_exits_cleanly(self, temp_home, capsys):
+        """A hand-run `cswap auto` holds the lock: the backend must exit 0, or
+        launchd's KeepAlive {SuccessfulExit: false} restarts it every ~10s."""
+        self.FakeEngine.loop_code = 1
+        with patch.object(cli, "_retire_when_idle", lambda *a: None):
+            assert self._run(["--json", "--backend"], temp_home) == 0
+        assert "holds the engine lock" in capsys.readouterr().err
+
+    def test_a_refused_hand_run_loop_still_fails(self, temp_home):
+        self.FakeEngine.loop_code = 1
+        assert self._run([], temp_home) == 1
 
     def test_backend_stops_its_engine_once_no_surface_is_open(self, monkeypatch):
         answers = iter([False, False, True])

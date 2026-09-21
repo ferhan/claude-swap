@@ -267,8 +267,12 @@ The backend runs exactly while some surface is open.
 1. A surface (TUI, or the menu bar app itself) takes the **lifecycle lock**
    (`<backup>/.lifecycle.lock`), registers itself — a lock file
    `<backup>/.surfaces/<kind>-<pid>.lock` held for its whole life — and
-   ensures the backend: reinstall if it isn't running or if the plist's
-   `ProgramArguments` differ from this build's (**newest caller wins**).
+   ensures the backend: reinstall if it isn't running, if the plist's
+   `ProgramArguments` differ from this build's (**newest caller wins**), or
+   if the plist's `CSWAP_VERSION` (an `EnvironmentVariables` entry recording
+   the release that wrote it) differs from this process's version. An
+   upgrade keeps the console script's path, so only the version shows the
+   running agent is old code; the reinstall's bootout + bootstrap restarts it.
    Then it releases the lifecycle lock. If launchd fails, the surface still
    opens and falls back to hosting its own engine.
 2. The backend (only when started with `--backend`) checks every 5s, after a
@@ -287,6 +291,19 @@ a retire that runs after a registration sees the surface and stays. The grace
 covers `cswap menubar`, which ensures the backend and exits before the menu
 bar app registers (the app ensures the backend again itself, which is also
 what brings it back at login).
+
+A backend that finds the engine lock held (a hand-run `cswap auto`) logs it
+to stderr and exits 0, not 1: under `KeepAlive: {SuccessfulExit: false}` a
+failure would be relaunched every ~10s for as long as that loop runs. The
+next surface to open sees it not running and starts it again. A hand-run
+`cswap auto` refused the same way still exits 1.
+
+The menu bar agent is a surface, not the backend, and outlives Quit: its plist
+stays, so it returns at login. *Open at Login* in its menu deletes or rewrites
+that plist without touching launchd (a self-`bootout` would SIGTERM the app
+mid-call), so the current session keeps running. `cswap menubar
+--uninstall-service` is the stop-now path: bootout + delete, from outside the
+app.
 
 Both labels (`com.cswap.auto`, `com.cswap.menubar`) can be overwritten by
 either a dev checkout or a global `uv tool install`; `cswap service status`

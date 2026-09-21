@@ -846,7 +846,22 @@ Defaults live in settings.json in the backup root; flags override them.
                     " — Ctrl-C to stop"
                 )
             )
-        sys.exit(engine.run_loop())
+        code = engine.run_loop()
+        if code and args.backend:
+            # run_loop's only non-zero is "another engine holds the lock" —
+            # almost always a hand-run `cswap auto`. Exit 0: under KeepAlive
+            # {SuccessfulExit: false} a 1 has launchd relaunch this every
+            # ~10s for as long as that loop runs. The next TUI or menu bar
+            # to open finds the backend not running and starts it again.
+            print(
+                "backend: another cswap engine holds the engine lock; exiting "
+                "cleanly so launchd does not restart this. The next TUI or "
+                "menu bar open starts the backend again.",
+                file=sys.stderr,
+                flush=True,
+            )
+            code = 0
+        sys.exit(code)
     except ClaudeSwitchError as e:
         if args.json:
             print(json.dumps(error_envelope(e)))
@@ -1084,9 +1099,31 @@ def _menubar_start() -> int:
         warning(f"Backend not started: {backend_error}", file=sys.stderr)
     restarted = launch_agent.ensure_running(launch_agent.LABEL, launch_agent.MENUBAR_ARGS)
     print("Menu bar started." if restarted else "Menu bar is already running.")
-    print(dimmed("It starts at login from now on; Quit from its menu closes it."))
+    print(dimmed(
+        "It starts at login from now on; untick 'Open at Login' in its menu, "
+        "or run 'cswap menubar --uninstall-service', to stop that."
+    ))
     if unsupported:
         warning(unsupported, file=sys.stderr)
+    return 0
+
+
+def _menubar_uninstall() -> int:
+    """``cswap menubar --uninstall-service``: close the menu bar now and keep
+    it from opening at login.
+
+    The bootout ends the running app (launchd SIGTERMs it) and the plist goes
+    with it. The backend is not touched: with the menu bar's surface lock
+    released it retires on its own once no TUI is open either.
+    """
+    from claude_swap import launch_agent
+
+    result = launch_agent.uninstall(launch_agent.LABEL)
+    if result["was_loaded"] or result["removed_plist"]:
+        print("Menu bar closed; it will not open at login.")
+    else:
+        print("Menu bar was not installed.")
+    print(dimmed("Bring it back with: cswap menubar"))
     return 0
 
 
@@ -1212,6 +1249,8 @@ def _service_status() -> int:
         print(f"  plist:   {result['plist']}")
         if result["program"]:
             print(f"  program: {' '.join(result['program'])}")
+        if result.get("version"):
+            print(f"  version: {result['version']}")
         if not result["installed"]:
             print(dimmed("launchd still has it loaded, but the plist is gone."))
     # Reported whether or not the service is installed: the engine lock is
@@ -1404,6 +1443,7 @@ Commands:
   %(prog)s tui                        interactive dashboard (also: bare %(prog)s)
   %(prog)s watch                      dashboard, opened on the live watch page
   %(prog)s menubar                    macOS menu bar app (starts at login)
+  %(prog)s menubar --uninstall-service  close it; stop it opening at login
   %(prog)s service status             is the backend running, and which build
   %(prog)s upgrade                    self-upgrade to latest
   %(prog)s purge                      remove all claude-swap data
@@ -1516,6 +1556,17 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         "--foreground",
         action="store_true",
         help=argparse.SUPPRESS,
+    )
+    # The spelling the published package already has for this (and `cswap
+    # auto --uninstall-service` for the backend), so existing scripts keep
+    # working.
+    parser.add_argument(
+        "--uninstall-service",
+        action="store_true",
+        help=(
+            "With 'menubar': close the menu bar and stop it opening at login "
+            "(macOS)"
+        ),
     )
 
     # Legacy `--flag` interface. Still fully supported (bare subcommands rewrite
@@ -1677,6 +1728,8 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
 
     if args.foreground and not args.menubar:
         parser.error("--foreground can only be used with 'menubar'")
+    if args.uninstall_service and not args.menubar:
+        parser.error("--uninstall-service can only be used with 'menubar'")
 
     # Self-upgrade runs before switcher init so we don't touch config/keychain
     # just to upgrade the tool itself.
@@ -1774,6 +1827,8 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
             if sys.platform != "darwin":
                 error("The menu bar is only available on macOS.")
                 sys.exit(1)
+            if args.uninstall_service:
+                sys.exit(_menubar_uninstall())
             if not args.foreground:
                 sys.exit(_menubar_start())
             # menubar is import-safe without the extra; a missing rumps

@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
-from claude_swap import launch_agent
+from claude_swap import __version__, launch_agent
 from claude_swap.exceptions import ClaudeSwitchError
 
 PROGRAM = ["/Users/x/.local/bin/cswap"]
@@ -566,10 +566,15 @@ def test_backend_pid_never_shells_out_off_macos():
 # --- surfaces and the backend's lifetime -------------------------------------
 
 
-def _install_plist(home: Path, label: str, argv: list[str]) -> None:
+def _install_plist(
+    home: Path, label: str, argv: list[str], version: str | None = __version__
+) -> None:
     target = launch_agent.plist_path(label, home)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(plistlib.dumps({"Label": label, "ProgramArguments": argv}))
+    body = {"Label": label, "ProgramArguments": argv}
+    if version is not None:
+        body["EnvironmentVariables"] = {"CSWAP_VERSION": version}
+    target.write_bytes(plistlib.dumps(body))
 
 
 def _running(pid: int = 4242):
@@ -609,6 +614,45 @@ class TestNeedsInstall:
                     launch_agent.AUTO_LABEL, self.ARGS, tmp_path, UID
                 )
 
+    def test_an_upgrade_is_picked_up(self, tmp_path):
+        # `cswap upgrade` keeps the console script's path, so the argv still
+        # matches; only the version the plist was written by gives it away.
+        _install_plist(
+            tmp_path, launch_agent.AUTO_LABEL, [*PROGRAM, *self.ARGS], version="0.0.1"
+        )
+        with patch.object(launch_agent, "resolve_program", return_value=PROGRAM):
+            with patch.object(launch_agent.subprocess, "run", side_effect=_running()):
+                assert launch_agent.needs_install(
+                    launch_agent.AUTO_LABEL, self.ARGS, tmp_path, UID
+                )
+
+    def test_a_plist_from_before_the_version_tag_is_replaced(self, tmp_path):
+        _install_plist(
+            tmp_path, launch_agent.AUTO_LABEL, [*PROGRAM, *self.ARGS], version=None
+        )
+        with patch.object(launch_agent, "resolve_program", return_value=PROGRAM):
+            with patch.object(launch_agent.subprocess, "run", side_effect=_running()):
+                assert launch_agent.needs_install(
+                    launch_agent.AUTO_LABEL, self.ARGS, tmp_path, UID
+                )
+
+    def test_install_writes_the_version_status_reads_back(self, tmp_path):
+        # The reinstall is what restarts the agent: bootout, then bootstrap.
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv[1])
+            return _completed(0)
+
+        with patch.object(launch_agent, "_wait_until_unloaded", return_value=True), \
+             patch.object(launch_agent.subprocess, "run", side_effect=run):
+            launch_agent.install(
+                launch_agent.AUTO_LABEL, tmp_path, PROGRAM, UID, self.ARGS
+            )
+            assert "bootout" in calls and calls[-1] == "bootstrap"
+            result = launch_agent.status(launch_agent.AUTO_LABEL, UID, tmp_path)
+        assert result["version"] == __version__
+
     def test_loaded_but_not_running_is_restarted(self, tmp_path):
         _install_plist(tmp_path, launch_agent.AUTO_LABEL, [*PROGRAM, *self.ARGS])
         idle = _router({"print": _completed(0, stdout="\tstate = not running\n")})
@@ -627,6 +671,30 @@ class TestNeedsInstall:
              patch.object(launch_agent, "install") as install:
             assert launch_agent.ensure_running("x", ("a",), tmp_path, UID) is True
         install.assert_called_once_with(label="x", home=tmp_path, uid=UID, args=("a",))
+
+
+class TestOpenAtLogin:
+    """The menu bar's "Open at Login" item: the plist, and only the plist."""
+
+    def test_off_removes_the_plist_without_touching_launchd(self, tmp_path):
+        _install_plist(tmp_path, launch_agent.LABEL, [*PROGRAM, *launch_agent.MENUBAR_ARGS])
+        assert launch_agent.opens_at_login(tmp_path)
+        with patch.object(launch_agent.subprocess, "run") as run:
+            launch_agent.set_open_at_login(False, tmp_path)
+            launch_agent.set_open_at_login(False, tmp_path)  # idempotent
+        # A self-bootout would SIGTERM the menu bar mid-call.
+        run.assert_not_called()
+        assert not launch_agent.opens_at_login(tmp_path)
+
+    def test_on_writes_the_menubar_plist(self, tmp_path):
+        with patch.object(launch_agent, "resolve_program", return_value=PROGRAM), \
+             patch.object(launch_agent.subprocess, "run") as run:
+            launch_agent.set_open_at_login(True, tmp_path)
+        run.assert_not_called()
+        parsed = plistlib.loads(launch_agent.plist_path(launch_agent.LABEL, tmp_path).read_bytes())
+        assert parsed["ProgramArguments"] == [*PROGRAM, *launch_agent.MENUBAR_ARGS]
+        assert parsed["EnvironmentVariables"]["CSWAP_VERSION"] == __version__
+        assert launch_agent.opens_at_login(tmp_path)
 
 
 class TestOpenSurface:

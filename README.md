@@ -250,9 +250,9 @@ cswap menubar
 
 Shows every account's 5h / 7d / spend usage and switches with a click (specific / rotate / best / next-available), plus the TUI's add / disable-enable / remove / refresh actions. Enable *Settings → Auto-switch accounts* to turn on the same engine as [`cswap auto`](#automatic-switching); it shares the `autoswitch.*` settings, so the menu bar, the TUI and the CLI stay in sync. Off until you turn it on.
 
-`cswap menubar` hands the menu bar to launchd and returns the prompt: it starts at login from then on and restarts on crash, with no `.app` bundle. *Quit* in its menu closes it until the next login. The engine runs in a small background process that the menu bar and the TUI start on their own and that stops once both are closed; `cswap service status` and `cswap service logs -f` show it.
+`cswap menubar` hands the menu bar to launchd and returns the prompt: it starts at login from then on and restarts on crash, with no `.app` bundle. *Quit* in its menu closes it until the next login; untick *Open at Login* first (or run `cswap menubar --uninstall-service`, which also closes it) to keep it from coming back. The engine runs in a small background process that the menu bar and the TUI start on their own and that stops once both are closed; `cswap service status` and `cswap service logs -f` show it.
 
-The agent lives at `~/Library/LaunchAgents/com.cswap.menubar.plist` and logs to `~/Library/Logs/com.cswap.menubar.{log,err}`. It pins the `cswap` console script, whose path survives an upgrade — but the running process keeps the old build until it restarts, so after `cswap upgrade` run `launchctl kickstart -k gui/$(id -u)/com.cswap.menubar`.
+The agent lives at `~/Library/LaunchAgents/com.cswap.menubar.plist` and logs to `~/Library/Logs/com.cswap.menubar.{log,err}`. It pins the `cswap` console script, whose path survives an upgrade, and records the cswap version that wrote it. After `cswap upgrade`, running `cswap menubar` restarts the menu bar on the new build, and opening the menu bar or the TUI restarts the background process.
 
 </details>
 

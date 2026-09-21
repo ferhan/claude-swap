@@ -908,8 +908,14 @@ def run(switcher) -> int:
                 None,
                 self._settings_menu(rumps),
                 rumps.MenuItem("Refresh now", callback=self.on_refresh_now),
+                self._login_item(rumps),
                 rumps.MenuItem("Quit", callback=self.on_quit),
             ]
+
+        def _login_item(self, rumps):
+            item = rumps.MenuItem("Open at Login", callback=self.on_toggle_login)
+            item.state = 1 if launch_agent.opens_at_login() else 0
+            return item
 
         def _add_menu(self, rumps):
             menu = rumps.MenuItem("Add account")
@@ -1132,6 +1138,15 @@ def run(switcher) -> int:
 
         def on_refresh_now(self, _sender):
             self.refresh_async(full=True)  # explicit user refresh → full pass
+
+        def on_toggle_login(self, _sender):
+            # Only the plist changes; this session keeps running. Untick then
+            # Quit is how the menu bar stays gone (see set_open_at_login).
+            try:
+                launch_agent.set_open_at_login(not launch_agent.opens_at_login())
+            except (ClaudeSwitchError, OSError) as e:
+                rumps.alert(title="claude-swap", message=str(e))
+            self.rebuild_menu()
 
         def on_quit(self, _sender):
             self._stop_engine()

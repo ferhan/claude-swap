@@ -94,6 +94,12 @@ pid NNNNN (/Users/ferhan/src/claude-swap/.venv/bin/cswap auto)
 — not starting a second one
 ```
 
+The reverse must not loop: with a hand-run `cswap auto` holding the lock, a
+backend started by a surface logs "another cswap engine holds the engine lock;
+exiting cleanly" to `~/Library/Logs/com.cswap.auto.err` and exits 0 — launchd
+does not restart it (`cswap service status` shows it not running, no pid
+churn). Stop the hand-run loop and reopen a surface: the backend starts again.
+
 Then close every surface, wait for the backend to retire, and confirm the same
 command now ticks normally:
 
@@ -136,7 +142,13 @@ logging the lock refusal. If you see that, it regressed.
 In the TUI's auto screen with the backend owning the engine, `l` toggles
 `autoswitch.enabled` (confirmed when going live) instead of restarting a local
 engine. Menu bar *Quit* is a clean exit: the plist stays, so it returns at the
-next login, and the backend retires if no TUI is open.
+next login, and the backend retires if no TUI is open. Unticking *Open at
+Login* deletes the plist but leaves the app running; *Quit* after it and the
+menu bar stays gone. Ticking it writes the plist back.
+
+After an upgrade (or any version bump), opening a surface restarts the backend
+on the new code: `cswap service status` shows the new `version:` and a new pid.
+`cswap menubar` does the same for the menu bar agent.
 
 With the backend running, the surfaces must show its events rather than
 producing their own — switches and quarantines from the backend should appear
@@ -249,12 +261,10 @@ strays with `pluginkit -r <path>`.
 
 ## Teardown
 
-Close the TUI and *Quit* the menu bar; the backend retires on its own. The menu
-bar plist stays (it returns at login) — there is no command to remove it; do it
-by hand if needed:
+Close the TUI and remove the menu bar; the backend retires on its own. (*Quit*
+alone keeps the menu bar plist, so it returns at login.)
 
 ```bash
-launchctl bootout gui/$(id -u)/com.cswap.menubar
-rm -f ~/Library/LaunchAgents/com.cswap.menubar.plist
-./widget/build-widget uninstall       # widget
+.venv/bin/cswap menubar --uninstall-service   # bootout + delete the plist
+./widget/build-widget uninstall               # widget
 ```
