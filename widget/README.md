@@ -187,11 +187,19 @@ Signing.xcconfig.example                 template for the gitignored Team ID fil
 App/CswapWidgetHostApp.swift             stub host window
 App/CswapWidgetHost.entitlements         sandbox, no exceptions
 Shared/Snapshot.swift                    schema-v1 decoding (shared with the tests)
+Shared/Display.swift                     pure display logic: ramp, severity, paging, trend
 Widget/CswapWidgetBundle.swift           @main WidgetBundle
-Widget/CswapWidget.swift                 provider + view
+Widget/CswapWidget.swift                 provider, Appearance override, widget definition
+Widget/Intents.swift                     Appearance config intent, ‹ › page intent + store
+Widget/Components.swift                  ring, bar, badges, window row, pager
+Widget/Pages.swift                       small and medium layouts
+Widget/LargePages.swift                  large layout, extra-large pace + trend panels
+Widget/DetailPages.swift                 per-account detail page
 Widget/SnapshotFile.swift                the only place the snapshot path is decided
 Widget/CswapWidgetExtension.entitlements sandbox + the one snapshot read exception
 Tests/SnapshotGoldenTests.swift          decodes ../tests/fixtures/snapshot_golden.json
+Tests/AutoswitchFixtureTests.swift       decodes Tests/Fixtures/snapshot_autoswitch.json
+Tests/DisplayTests.swift                 Shared/Display.swift
 ```
 
 `CswapWidget.xcodeproj`, `Signing.xcconfig`, `build/` and both generated
@@ -214,7 +222,21 @@ never sees it half-written.
 
 ## Status
 
-Snapshot decoding and usage rendering are in. Tests:
+All four sizes (small, medium, large, extra-large), ‹ › paging with a detail
+page per account, a per-widget Appearance setting (System/Light/Dark, from Edit
+Widget), and a read-only auto-switch status line.
+
+The `autoswitch` block and 5h `history` are additive and optional: without them
+the threshold defaults to 90%, next-up is omitted and the extra-large trend
+panel says so. `Tests/Fixtures/snapshot_autoswitch.json` is a hand-written
+fixture for those fields until the Python producer emits them and the golden
+fixture can cover them.
+
+Page state lives in the extension's own defaults, keyed by size: WidgetKit
+gives no identifier for a placed widget, so two widgets of the same size page
+together.
+
+Tests:
 
 ```bash
 xcodebuild -scheme CswapWidgetTests -destination 'platform=macOS' \

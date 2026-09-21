@@ -201,4 +201,17 @@ final class SnapshotGoldenTests: XCTestCase {
         XCTAssertNil(account.usageAgeSeconds)
         XCTAssertNil(account.alias)
     }
+
+    // MARK: - Additive fields absent (today's producer)
+
+    /// The golden fixture predates `autoswitch` and `history`; both must
+    /// decode as absent and the display must fall back to its defaults.
+    func testAdditiveAutoswitchFieldsAreAbsent() {
+        XCTAssertNil(snapshot.autoswitch)
+        XCTAssertEqual(snapshot.threshold, Display.defaultThreshold)
+        XCTAssertNil(snapshot.nextCandidate)
+        XCTAssertTrue(snapshot.accounts.allSatisfy { $0.usage?.fiveHour?.history == nil })
+        XCTAssertFalse(Trend.hasData(snapshot, now: snapshot.takenAt))
+        XCTAssertTrue(Trend.switchMarkers(snapshot, now: snapshot.takenAt).isEmpty)
+    }
 }

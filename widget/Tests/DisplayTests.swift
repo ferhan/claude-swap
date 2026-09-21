@@ -1,0 +1,138 @@
+import XCTest
+
+/// Pure display decisions: ramp, severity, formatting, paging.
+final class DisplayTests: XCTestCase {
+    private func golden() throws -> Snapshot {
+        let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "snapshot_golden", withExtension: "json"))
+        return try Snapshot.decode(Data(contentsOf: url))
+    }
+
+    // MARK: - Ramp and severity
+
+    func testRampIsAnchoredToAbsolutePercentWithRedAtThreshold() {
+        let stops = Ramp.stops(threshold: 90)
+        XCTAssertEqual(stops.first, RampStop(location: 0, tone: .green))
+        XCTAssertEqual(stops.first { $0.tone == .yellow }?.location, 0.5)
+        XCTAssertEqual(stops.first { $0.tone == .orange }?.location, 0.7)
+        XCTAssertEqual(stops.first { $0.tone == .red }?.location, 0.9)
+        XCTAssertEqual(stops.last?.location, 1)
+    }
+
+    func testRampStaysOrderedForALowThreshold() {
+        for threshold in [0.0, 10, 40, 60, 75, 100, 150] {
+            let locations = Ramp.stops(threshold: threshold).map(\.location)
+            XCTAssertEqual(locations, locations.sorted(), "threshold \(threshold)")
+            XCTAssertTrue(locations.allSatisfy { (0...1).contains($0) }, "threshold \(threshold)")
+        }
+        XCTAssertEqual(Ramp.stops(threshold: 60).first { $0.tone == .red }?.location, 0.6)
+    }
+
+    func testSeverity() {
+        XCTAssertEqual(Severity(pct: 69.9, threshold: 90), .normal)
+        XCTAssertEqual(Severity(pct: 70, threshold: 90), .warning)
+        XCTAssertEqual(Severity(pct: 90, threshold: 90), .critical)
+        // A threshold below the warning line: critical wins.
+        XCTAssertEqual(Severity(pct: 65, threshold: 60), .critical)
+    }
+
+    // MARK: - Formatting
+
+    func testCountdown() {
+        let now = Date(timeIntervalSince1970: 0)
+        XCTAssertEqual(Format.countdown(to: now.addingTimeInterval(3 * 86_400 + 11 * 3_600 + 59), now: now), "3d 11h")
+        XCTAssertEqual(Format.countdown(to: now.addingTimeInterval(5 * 3_600 + 12 * 60), now: now), "5h 12m")
+        XCTAssertEqual(Format.countdown(to: now.addingTimeInterval(12 * 60 + 5), now: now), "12m")
+        XCTAssertEqual(Format.countdown(to: now.addingTimeInterval(30), now: now), "<1m")
+        XCTAssertEqual(Format.countdown(to: now.addingTimeInterval(-5), now: now), "now")
+    }
+
+    func testAgeAndPct() {
+        XCTAssertEqual(Format.age(seconds: 30), "just now")
+        XCTAssertEqual(Format.age(seconds: 90), "1m ago")
+        XCTAssertEqual(Format.age(seconds: 3_600), "1h ago")
+        XCTAssertEqual(Format.age(seconds: 2 * 86_400), "2d ago")
+        XCTAssertEqual(Format.pct(62.5), "62%")
+        XCTAssertEqual(Format.pct(99.6), "99%")
+        XCTAssertEqual(Format.pct(100), "100%")
+    }
+
+    func testInitials() {
+        XCTAssertEqual(Format.initials("work"), "W")
+        XCTAssertEqual(Format.initials("client-a"), "CA")
+        XCTAssertEqual(Format.initials("user@example.com"), "U")
+        XCTAssertEqual(Format.initials("first.last@example.com"), "FL")
+        XCTAssertEqual(Format.initials("--"), "?")
+    }
+
+    func testAccountDisplayFields() throws {
+        let snapshot = try golden()
+        XCTAssertEqual(snapshot.accounts[0].subtitle, "Example Org")
+        XCTAssertEqual(snapshot.accounts[1].subtitle, "personal")
+        XCTAssertEqual(snapshot.accounts[3].subtitle, "API key")
+        XCTAssertEqual(snapshot.accounts[3].statusText, "Disabled · no usage quota")
+        XCTAssertTrue(snapshot.accounts[1].isStale)
+        XCTAssertFalse(snapshot.accounts[0].isStale)
+        // No 7d aggregate: the compact weekly view falls back to the fullest model.
+        XCTAssertEqual(snapshot.accounts[2].weeklyWindow?.title, "Opus")
+        XCTAssertEqual(snapshot.accounts[2].windows().map(\.title), ["5h", "Opus", "Sonnet"])
+        XCTAssertEqual(snapshot.accounts[2].peakPct, 100)
+    }
+
+    // MARK: - Paging
+
+    func testSmallPagesAlternateHeroAndDetail() throws {
+        let snapshot = try golden()
+        let pages = Paging.pages(for: .small, snapshot: snapshot)
+        XCTAssertEqual(pages.count, 8)
+        XCTAssertEqual(pages[0], .hero(account: 1))
+        XCTAssertEqual(pages[1], .detail(account: 1))
+        XCTAssertEqual(Paging.label(for: pages[2], snapshot: snapshot), "2/4")
+        XCTAssertEqual(Paging.label(for: pages[1], snapshot: snapshot), "work · details")
+    }
+
+    func testMediumOverviewSplitsOthersByThree() throws {
+        let snapshot = try golden()
+        XCTAssertEqual(Paging.overviewChunks(for: .medium, snapshot: snapshot).map { $0.map(\.number) }, [[2, 3, 4]])
+        let pages = Paging.pages(for: .medium, snapshot: snapshot)
+        XCTAssertEqual(pages.first, .overview(index: 0, count: 1))
+        XCTAssertEqual(pages.count, 5)
+        XCTAssertEqual(Paging.label(for: pages[0], snapshot: snapshot), "Overview")
+    }
+
+    func testLargeFitsTheGoldenAccountsOnOnePage() throws {
+        let snapshot = try golden()
+        XCTAssertEqual(Paging.overviewChunks(for: .large, snapshot: snapshot).count, 1)
+        XCTAssertEqual(Paging.pages(for: .extraLarge, snapshot: snapshot).count, 5)
+    }
+
+    func testLargeSplitsWhenCardsOverflow() throws {
+        // Eight copies of the heaviest card cannot share a page.
+        let json = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: XCTUnwrap(Bundle(for: Self.self)
+                .url(forResource: "snapshot_golden", withExtension: "json")))) as? [String: Any]
+        var doc = try XCTUnwrap(json)
+        var rows = try XCTUnwrap(doc["accounts"] as? [[String: Any]])
+        let first = rows[0]
+        rows = (1...8).map { number in
+            var row = first
+            row["number"] = number
+            row["active"] = number == 1
+            return row
+        }
+        doc["accounts"] = rows
+        let snapshot = try Snapshot.decode(JSONSerialization.data(withJSONObject: doc))
+        XCTAssertEqual(snapshot.accounts.count, 8)
+        let chunks = Paging.overviewChunks(for: .large, snapshot: snapshot)
+        XCTAssertGreaterThan(chunks.count, 1)
+        XCTAssertEqual(chunks.flatMap { $0 }.count, 8)
+        XCTAssertTrue(chunks.allSatisfy { !$0.isEmpty })
+        XCTAssertEqual(Paging.label(for: .overview(index: 1, count: chunks.count), snapshot: snapshot),
+                       "Overview 2/\(chunks.count)")
+    }
+
+    func testNormalizedWraps() {
+        XCTAssertEqual(Paging.normalized(-1, count: 5), 4)
+        XCTAssertEqual(Paging.normalized(5, count: 5), 0)
+        XCTAssertEqual(Paging.normalized(7, count: 0), 0)
+    }
+}

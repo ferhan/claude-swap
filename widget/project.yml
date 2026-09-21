@@ -50,7 +50,11 @@ targets:
     info:
       path: App/Info.plist
       properties:
-        CFBundleDisplayName: cswap Widget
+        # The widget gallery groups widgets under the host app's name, and
+        # LaunchServices shows CFBundleName for an unlocalized bundle, so both
+        # say "cswap". PRODUCT_NAME (and so the .app file name) is unchanged.
+        CFBundleDisplayName: cswap
+        CFBundleName: cswap
         LSApplicationCategoryType: public.app-category.developer-tools
     dependencies:
       - target: CswapWidgetExtension

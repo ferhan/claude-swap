@@ -11,6 +11,10 @@ struct Snapshot: Decodable, Sendable {
     let takenAt: Date
     let activeAccountNumber: Int?
     let accounts: [Account]
+    /// Additive: absent from snapshots written before the backend published
+    /// its auto-switch state. The widget then assumes the default threshold
+    /// and shows no next-up or trend markers.
+    let autoswitch: AutoSwitch?
 
     static func decode(_ data: Data) throws -> Snapshot {
         try decoder.decode(Snapshot.self, from: data)
@@ -29,6 +33,38 @@ struct Snapshot: Decodable, Sendable {
             return date
         }
         return decoder
+    }
+}
+
+/// The backend's auto-switch state, as of `takenAt`. Read-only in the widget.
+struct AutoSwitch: Decodable, Sendable {
+    let enabled: Bool
+    /// Percent (0-100) at which the engine switches away from an account.
+    let threshold: Double
+    /// The account the engine would switch to next; null when there is none.
+    let nextCandidateNumber: Int?
+    /// Switches the engine made recently, oldest first. Optional so a producer
+    /// that omits an empty list still decodes.
+    let switches: [SwitchEvent]?
+}
+
+struct SwitchEvent: Decodable, Sendable {
+    let date: Date
+    let fromNumber: Int
+    let toNumber: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case date = "at", fromNumber = "from", toNumber = "to"
+    }
+}
+
+/// One sample of a window's usage, for the 24h trend.
+struct HistoryPoint: Decodable, Sendable, Equatable {
+    let time: Date
+    let pct: Double
+
+    private enum CodingKeys: String, CodingKey {
+        case time = "t", pct
     }
 }
 
@@ -83,6 +119,9 @@ struct Window: Decodable, Sendable {
     let willLastToReset: Bool?
     let name: String?
     let maxed: Bool?
+    /// Additive, 5h window only: the last 24h of samples, oldest first (at
+    /// most 288). Absent from snapshots that predate it.
+    let history: [HistoryPoint]?
 
     // `countdown` and `clock` are deliberately NOT decoded. The producer
     // renders them at snapshot time from its own `datetime.now()` in the
