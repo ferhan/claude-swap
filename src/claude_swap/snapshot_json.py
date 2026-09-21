@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -83,6 +84,60 @@ def _rolled_usage(usage: dict, now: float) -> dict:
     return out
 
 
+# The model families the display layer collapses ``usage.scoped[]`` rows into.
+# Matched as a standalone word against the API's display name, case-insensitive
+# (e.g. "Claude Opus 4.8", "Opus 5", "opus" all match "Opus"); a name matching
+# none of these passes through unchanged, under its own (unmodified) name.
+_FAMILY_PATTERN = re.compile(r"\b(opus|sonnet|haiku|fable)\b", re.IGNORECASE)
+
+
+def _model_family(name: str) -> str | None:
+    """The canonical family word in a scoped window's display name, or
+    ``None`` when it matches no known family."""
+    match = _FAMILY_PATTERN.search(name)
+    return match.group(1).capitalize() if match else None
+
+
+def _collapse_scoped_by_family(scoped: list[dict]) -> list[dict]:
+    """Group ``usage.scoped[]`` rows by model family so versions (e.g. "Claude
+    Opus 4.8" vs "Opus 5") never appear as separate rows in a display. Names
+    matching no family pass through unchanged. Order of first appearance
+    (by family, or by row for a pass-through name) is preserved.
+
+    Merge rule when several windows collapse into one family: ``pct`` is the
+    max across the group (the binding constraint); ``maxed`` is true if any
+    window in the group is maxed; every other field — ``resetsAt``,
+    ``countdown``/``clock``, the pace fields — is taken from whichever window
+    carries that max ``pct`` (a tie keeps the first one seen), since that's
+    the window actually gating and its reset/pace are the ones that matter.
+    """
+    groups: list[tuple[str | None, list[dict]]] = []
+    family_index: dict[str, int] = {}
+    for window in scoped:
+        family = _model_family(window["name"])
+        if family is None:
+            groups.append((None, [window]))
+            continue
+        idx = family_index.get(family)
+        if idx is None:
+            family_index[family] = len(groups)
+            groups.append((family, [window]))
+        else:
+            groups[idx][1].append(window)
+
+    out = []
+    for family, windows in groups:
+        if family is None:
+            out.append(windows[0])
+            continue
+        binding = max(windows, key=lambda w: w["pct"])
+        merged = dict(binding)
+        merged["name"] = family
+        merged["maxed"] = any(w.get("maxed") for w in windows)
+        out.append(merged)
+    return out
+
+
 def _account_row(
     acc: AccountSnapshot, now: float, history: list | None = None
 ) -> dict:
@@ -97,6 +152,8 @@ def _account_row(
             # The menu bar's "(!)" marker — a maxed per-model limit is the usual
             # reason to switch, and it outranks the ahead-of-pace marker.
             window["maxed"] = window["pct"] >= 100
+        if usage.get("scoped"):
+            usage["scoped"] = _collapse_scoped_by_family(usage["scoped"])
         if history is not None and "fiveHour" in usage:
             usage["fiveHour"]["history"] = [
                 {"t": iso_timestamp(t), "pct": pct} for t, pct in history

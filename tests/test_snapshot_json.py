@@ -256,6 +256,84 @@ def test_matches_the_menubar_roll_forward():
     }
 
 
+# --- scoped-window family grouping ----------------------------------------------
+
+def test_scoped_windows_collapse_by_model_family():
+    # Two Opus versions collapse into one row; the max-pct window wins.
+    usage = {
+        "scoped": [
+            {"name": "Claude Opus 4.8", "pct": 40.0, "resets_at": _iso(1 * 86400)},
+            {"name": "Opus 5", "pct": 90.0, "resets_at": _iso(2 * 86400)},
+        ]
+    }
+    scoped = snapshot_payload(
+        _snap(_account(usage=_entry(usage)))
+    )["accounts"][0]["usage"]["scoped"]
+
+    assert len(scoped) == 1
+    assert scoped[0]["name"] == "Opus"
+    assert scoped[0]["pct"] == 90.0  # max across the group
+    # resetsAt/countdown come from the max-pct (binding) window.
+    assert scoped[0]["resetsAt"] == usage["scoped"][1]["resets_at"]
+
+
+def test_scoped_windows_maxed_is_true_if_any_member_is_maxed():
+    usage = {
+        "scoped": [
+            {"name": "Opus 4", "pct": 100.0, "resets_at": _iso(1 * 86400)},
+            {"name": "Opus 5", "pct": 20.0, "resets_at": _iso(2 * 86400)},
+        ]
+    }
+    scoped = snapshot_payload(
+        _snap(_account(usage=_entry(usage)))
+    )["accounts"][0]["usage"]["scoped"]
+
+    assert len(scoped) == 1
+    # The binding (max-pct) window is the 100% one, so pct/resetsAt/maxed all
+    # agree here; the point of the test is that "any maxed" holds generally.
+    assert scoped[0]["pct"] == 100.0
+    assert scoped[0]["maxed"] is True
+
+
+def test_scoped_window_name_matching_no_family_passes_through_unchanged():
+    usage = {"scoped": [{"name": "Some Custom Model", "pct": 10.0}]}
+    scoped = snapshot_payload(
+        _snap(_account(usage=_entry(usage)))
+    )["accounts"][0]["usage"]["scoped"]
+
+    assert len(scoped) == 1
+    assert scoped[0]["name"] == "Some Custom Model"
+    assert scoped[0]["pct"] == 10.0
+
+
+def test_scoped_family_match_is_case_insensitive():
+    usage = {"scoped": [{"name": "opus", "pct": 15.0}]}
+    scoped = snapshot_payload(
+        _snap(_account(usage=_entry(usage)))
+    )["accounts"][0]["usage"]["scoped"]
+
+    assert scoped[0]["name"] == "Opus"  # normalized to the canonical family name
+
+
+def test_scoped_family_groups_preserve_order_of_first_appearance():
+    usage = {
+        "scoped": [
+            {"name": "Sonnet 4", "pct": 10.0},
+            {"name": "Custom Model", "pct": 20.0},
+            {"name": "Opus 4", "pct": 30.0},
+            {"name": "Opus 5", "pct": 40.0},  # collapses into the earlier Opus group
+            {"name": "Sonnet 5", "pct": 50.0},  # collapses into the earlier Sonnet group
+        ]
+    }
+    scoped = snapshot_payload(
+        _snap(_account(usage=_entry(usage)))
+    )["accounts"][0]["usage"]["scoped"]
+
+    assert [w["name"] for w in scoped] == ["Sonnet", "Custom Model", "Opus"]
+    assert next(w for w in scoped if w["name"] == "Sonnet")["pct"] == 50.0
+    assert next(w for w in scoped if w["name"] == "Opus")["pct"] == 40.0
+
+
 # --- no secrets ----------------------------------------------------------------
 
 _SECRET_MARKERS = ("token", "secret", "password", "apikey", "credential", "bearer")
