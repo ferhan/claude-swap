@@ -202,16 +202,36 @@ final class SnapshotGoldenTests: XCTestCase {
         XCTAssertNil(account.alias)
     }
 
-    // MARK: - Additive fields absent (today's producer)
+    // MARK: - Additive fields (autoswitch block, 5h history)
 
-    /// The golden fixture predates `autoswitch` and `history`; both must
-    /// decode as absent and the display must fall back to its defaults.
-    func testAdditiveAutoswitchFieldsAreAbsent() {
-        XCTAssertNil(snapshot.autoswitch)
-        XCTAssertEqual(snapshot.threshold, Display.defaultThreshold)
-        XCTAssertNil(snapshot.nextCandidate)
-        XCTAssertTrue(snapshot.accounts.allSatisfy { $0.usage?.fiveHour?.history == nil })
-        XCTAssertFalse(Trend.hasData(snapshot, now: snapshot.takenAt))
-        XCTAssertTrue(Trend.switchMarkers(snapshot, now: snapshot.takenAt).isEmpty)
+    /// The golden fixture now carries `autoswitch` and `history`; both must
+    /// decode and feed `Display`/`Trend` as the producer intends.
+    func testAutoswitchAndHistoryDecode() throws {
+        let auto = try XCTUnwrap(snapshot.autoswitch)
+        XCTAssertTrue(auto.enabled)
+        XCTAssertEqual(auto.threshold, 90.0)
+        XCTAssertEqual(auto.nextCandidateNumber, 2)
+        XCTAssertEqual(auto.switches?.count, 1)
+        XCTAssertEqual(auto.switches?.first?.fromNumber, 2)
+        XCTAssertEqual(auto.switches?.first?.toNumber, 1)
+        XCTAssertEqual(auto.switches?.first?.date.timeIntervalSince1970, 1_789_891_428.0)
+
+        XCTAssertEqual(snapshot.threshold, 90.0)
+        XCTAssertEqual(snapshot.nextCandidate?.number, 2)
+
+        let history = try XCTUnwrap(snapshot.accounts[0].usage?.fiveHour?.history)
+        XCTAssertEqual(history.count, 2)
+        XCTAssertEqual(history.last?.pct, 62.5)
+        // Empty list, not absent, for the other two rows with usage.
+        XCTAssertEqual(snapshot.accounts[1].usage?.fiveHour?.history?.count, 0)
+        XCTAssertEqual(snapshot.accounts[2].usage?.fiveHour?.history?.count, 0)
+
+        XCTAssertTrue(Trend.hasData(snapshot, now: snapshot.takenAt))
+        let markers = Trend.switchMarkers(snapshot, now: snapshot.takenAt)
+        XCTAssertEqual(markers.count, 1)
+        XCTAssertEqual(markers.first?.date.timeIntervalSince1970, 1_789_891_428.0)
+        // Account 2 (the "from" side) has no history samples to interpolate
+        // against, so the marker falls back to the threshold.
+        XCTAssertEqual(markers.first?.pct, snapshot.threshold)
     }
 }
