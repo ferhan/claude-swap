@@ -367,8 +367,11 @@ def test_write_snapshot_leaves_no_temp_file_on_failure(tmp_path: Path):
 class _FakeSwitcher:
     """The surface ``SnapshotSource`` consumes, and nothing else."""
 
-    def __init__(self, snap: AccountsSnapshot):
+    def __init__(self, snap: AccountsSnapshot, backup_dir: Path | None = None):
         self._snap = snap
+        # Where ``take_snapshot`` reads the 5h history store; a missing dir
+        # just means no history yet.
+        self.backup_dir = backup_dir or Path("/nonexistent-cswap-backup")
         self.fetch_sets: list[set[str] | None] = []
 
     def accounts_snapshot(self, fetch: set[str] | None = None) -> AccountsSnapshot:
@@ -406,6 +409,10 @@ def test_snapshot_command_prints_json_to_stdout(fake_switcher, capsys):
     assert [a["number"] for a in payload["accounts"]] == [1, 2]
     # Paced like every other read path: the store decides what may be fetched.
     assert fake_switcher.fetch_sets == [None]
+    # History is store data, so the one-shot carries it (empty here); the
+    # ``autoswitch`` block is engine state and only the engine publishes it.
+    assert payload["accounts"][0]["usage"]["fiveHour"]["history"] == []
+    assert "autoswitch" not in payload
 
 
 def test_snapshot_command_writes_the_file_instead_of_stdout(
@@ -472,7 +479,7 @@ def frozen_clock(monkeypatch):
     time.tzset()
 
 
-def _golden_switcher() -> _FakeSwitcher:
+def _golden_switcher(backup_dir: Path | None = None) -> _FakeSwitcher:
     """The synthetic aggregate the fixture is generated from.
 
     Fake identities only — no real email, organization name or organization
@@ -572,12 +579,65 @@ def _golden_switcher() -> _FakeSwitcher:
             usage=_entry(sentinel=USAGE_API_KEY),
         ),
         taken_at=_GOLDEN_NOW,
-    ))
+    ), backup_dir)
+
+
+def _golden_history(backup_dir: Path) -> None:
+    """History rows for the fixture: account 1 has three samples (one older
+    than 24h, pruned), account 2 has a series recorded under a previous
+    occupant's email (not served, so ``history: []``), and two switches, one
+    older than 24h."""
+    from claude_swap.usage_history import UsageHistory
+
+    history = UsageHistory(backup_dir)
+    history.record_samples(
+        {"1": ("dev@example.com", _GOLDEN_NOW - 25 * 3600, 10.0)},
+        _GOLDEN_NOW - 25 * 3600,
+    )
+    history.record_samples(
+        {"1": ("dev@example.com", _GOLDEN_NOW - 600, 55.0),
+         "2": ("someone-else@example.com", _GOLDEN_NOW - 600, 99.0)},
+        _GOLDEN_NOW - 600,
+    )
+    history.record_samples(
+        {"1": ("dev@example.com", _GOLDEN_NOW - 90, 62.5)}, _GOLDEN_NOW
+    )
+    history.record_switch(_GOLDEN_NOW - 30 * 3600, 3, 2)
+    history.record_switch(_GOLDEN_NOW - 7200, 2, 1)
+
+
+# What the engine passes as ``autoswitch`` (see
+# ``AutoSwitchEngine._autoswitch_block``); pinned here as the shape contract.
+def _golden_autoswitch(backup_dir: Path) -> dict:
+    from claude_swap.json_output import iso_timestamp
+    from claude_swap.usage_history import UsageHistory
+
+    return {
+        "enabled": True,
+        "threshold": 90.0,
+        "nextCandidateNumber": 2,
+        "switches": [
+            {"at": iso_timestamp(s["at"]), "from": s["from"], "to": s["to"]}
+            for s in UsageHistory(backup_dir).switches(_GOLDEN_NOW)
+        ],
+    }
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="TZ pinning needs time.tzset()")
-def test_snapshot_matches_the_committed_golden_fixture(frozen_clock):
-    payload = take_snapshot(_golden_switcher())
+def test_snapshot_matches_the_committed_golden_fixture(frozen_clock, tmp_path):
+    from claude_swap.snapshot_json import history_for
+
+    _golden_history(tmp_path)
+    snap = _golden_switcher(tmp_path).accounts_snapshot()
+    # The engine's publish path: history from the store plus its own block.
+    payload = snapshot_payload(
+        snap,
+        history=history_for(tmp_path, snap),
+        autoswitch=_golden_autoswitch(tmp_path),
+    )
+    # The one-shot is the same document minus the engine-only block.
+    one_shot = take_snapshot(_golden_switcher(tmp_path))
+    assert one_shot == {k: v for k, v in payload.items() if k != "autoswitch"}
 
     if os.environ.get("UPDATE_GOLDEN"):
         _GOLDEN_PATH.write_text(json.dumps(payload, indent=2) + "\n")

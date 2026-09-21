@@ -44,7 +44,7 @@ from typing import ClassVar
 
 from claude_swap import oauth, poll_policy
 from claude_swap.exceptions import ClaudeSwitchError
-from claude_swap.json_output import SCHEMA_VERSION, USAGE_TOKEN_EXPIRED
+from claude_swap.json_output import SCHEMA_VERSION, USAGE_TOKEN_EXPIRED, iso_timestamp
 from claude_swap.locking import (
     EngineLock,
     FileLock,
@@ -63,9 +63,10 @@ from claude_swap.settings import (
     load_settings,
     parse_model_names,
 )
-from claude_swap.snapshot_json import snapshot_payload, write_snapshot
+from claude_swap.snapshot_json import history_for, snapshot_payload, write_snapshot
 from claude_swap.snapshot_source import SnapshotSource
 from claude_swap.switcher import ClaudeAccountSwitcher
+from claude_swap.usage_history import UsageHistory
 from claude_swap.usage_store import due_candidate, plan_oversleeps_interval
 
 STATE_FILENAME = "autoswitch_state.json"
@@ -811,6 +812,11 @@ class AutoSwitchEngine:
             SnapshotSource(switcher) if snapshot_path is not None else None
         )
         self.clock = clock
+        # 24h display history (5h samples, switches) for the snapshot.
+        self._history = UsageHistory(switcher.backup_dir)
+        # This tick's collected (quarantined, usage, headroom), kept so the
+        # snapshot can ask the ranking who comes next AFTER the tick acted.
+        self._ranking_inputs: tuple | None = None
         # Whether THIS tick may actually move the active account: false under
         # --dry-run and whenever ``autoswitch.enabled`` is off. Seeded from
         # dry_run so a ``_perform`` reached outside a tick still honours it.
@@ -1091,14 +1097,106 @@ class AutoSwitchEngine:
         reported and dropped, never allowed to end the loop.
         """
         try:
+            snap = self._snapshot_source.take(store_only=True)
+            if not self.dry_run:
+                self._record_history(snap)
             write_snapshot(
                 self.snapshot_path,
-                snapshot_payload(self._snapshot_source.take(store_only=True)),
+                snapshot_payload(
+                    snap,
+                    history=history_for(self.switcher.backup_dir, snap),
+                    autoswitch=self._autoswitch_block(snap.taken_at),
+                ),
             )
         except Exception as e:
             _logger.warning(
                 "could not write snapshot %s: %r", self.snapshot_path, e
             )
+
+    def _record_history(self, snap) -> None:
+        """Append every 5h measurement that landed since the last one recorded.
+
+        The store's rows, not this tick's fetches: a measurement another
+        surface landed is just as real. ``UsageHistory`` drops a sample no
+        newer than the series' last, so a tick that fetched nothing writes
+        nothing.
+        """
+        samples = {}
+        for acc in snap.accounts:
+            usage = acc.usage.last_good
+            five = usage.get("five_hour") if isinstance(usage, dict) else None
+            pct = five.get("pct") if isinstance(five, dict) else None
+            if acc.usage.fetched_at is None or not isinstance(pct, (int, float)):
+                continue
+            samples[acc.number] = (acc.email, acc.usage.fetched_at, float(pct))
+        if samples:
+            self._history.record_samples(samples, snap.taken_at)
+
+    def _autoswitch_block(self, now: float) -> dict:
+        """The snapshot's top-level ``autoswitch`` object."""
+        return {
+            "enabled": self.settings.enabled,
+            "threshold": self.settings.threshold,
+            "nextCandidateNumber": self._next_candidate(),
+            "switches": [
+                {"at": iso_timestamp(s["at"]), "from": s["from"], "to": s["to"]}
+                for s in self._history.switches(now)
+            ],
+        }
+
+    def _next_candidate(self) -> int | None:
+        """Who the engine would move to if it had to switch now.
+
+        Asks ``_rank`` — the ranking ``_tick_inner`` switches on, no-return
+        bar included — over this tick's collected usage, from where the tick
+        left us (after any switch it made). The trigger is the one the active
+        account's state implies: ``failover`` when its usage is unknown,
+        ``at-limit`` when it is spent, otherwise ``proactive`` as if it stood
+        exactly at the threshold — below it the engine does not rank at all,
+        and "next" means where it goes when it crosses. Cooldown is ignored:
+        this answers who, not when. None when there is no target or the
+        engine would not act (no managed active account, API-key active).
+        """
+        if self._ranking_inputs is None:
+            return None
+        quarantined, usage, headroom = self._ranking_inputs
+        settings = self.settings
+        try:
+            current = self.switcher.current_account_number()
+            if current is None or (
+                self.switcher.account_kind_for(current) == "api_key"
+                and not settings.include_api_key_accounts
+            ):
+                return None
+            _, oauth_candidates, api_key_candidates = self._candidate_pools(
+                current, quarantined, settings
+            )
+            active_headroom = headroom.get(current)
+            if active_headroom is None:
+                trigger = "failover"
+            elif active_headroom <= 0:
+                trigger = "at-limit"
+            else:
+                trigger = "proactive"
+                active_headroom = min(active_headroom, 100.0 - settings.threshold)
+            ordered, _, _ = self._rank(
+                self._read_state(),
+                trigger=trigger,
+                consume_first=settings.strategy == "consume-first",
+                oauth_candidates=oauth_candidates,
+                usage=usage,
+                headroom=headroom,
+                current=current,
+                active_headroom=active_headroom,
+                settings=settings,
+                now=self.clock(),
+            )
+            # The engine's own last resort when it must move.
+            ordered = ordered or api_key_candidates
+            return int(ordered[0]) if ordered else None
+        except Exception as e:  # display only; never worth a failed publish
+            _logger.debug("next-candidate preview failed: %r", e)
+            return None
 
     def tick(self) -> TickOutcome:
         """Evaluate once: poll usage, maybe switch. Never raises."""
@@ -1122,6 +1220,7 @@ class AutoSwitchEngine:
 
     def _tick_inner(self) -> TickOutcome:
         self._sleep_until_ts = None
+        self._ranking_inputs = None
         self._blocked_wait_long = False
         self._idle_hold_slow = False
         settings = self._reload_settings()
@@ -1173,6 +1272,7 @@ class AutoSwitchEngine:
         entries, usage, headroom = self._collect_scheduled_usage(
             current, quarantined, threshold=settings.threshold
         )
+        self._ranking_inputs = (quarantined, usage, headroom)
         self._emit(
             PollEvent(
                 active=active_ref,
@@ -1287,22 +1387,12 @@ class AutoSwitchEngine:
             return TickOutcome.NO_ACTION
 
         # -- candidate selection ------------------------------------------
-        candidates = [
-            num
-            for num in self.switcher.switchable_account_numbers()
-            if num != current and num not in quarantined
-        ]
-        oauth_candidates = [
-            n for n in candidates if self.switcher.account_kind_for(n) != "api_key"
-        ]
-        # The no-return bar itself lives in `_rank` below: it is a statement
-        # about the CHOICE, so it belongs where the choice is made rather than
-        # in this census of what exists. See `_no_return_account` for the
+        # The no-return bar itself lives in `_rank`: it is a statement about
+        # the CHOICE, so it belongs where the choice is made rather than in
+        # this census of what exists. See `_no_return_account` for the
         # incident, the scoping, and the release.
-        api_key_candidates = (
-            [n for n in candidates if self.switcher.account_kind_for(n) == "api_key"]
-            if settings.include_api_key_accounts
-            else []
+        candidates, oauth_candidates, api_key_candidates = self._candidate_pools(
+            current, quarantined, settings
         )
         if (
             trigger == "consume-first"
@@ -1336,81 +1426,9 @@ class AutoSwitchEngine:
 
         consume_first = settings.strategy == "consume-first"
 
-        def _rank(**kw):
-            """Rank with the no-return bar, and WITHOUT it if that empties AND
-            the barred account is a different proposition from the one we left.
-
-            Emptiness alone cannot be the release. On two accounts there is
-            exactly one candidate, so barring it ALWAYS empties the list —
-            measured, sweeping active x barred headroom x both reset shapes,
-            `n=2 barred-rank EMPTY=320 NONEMPTY=0`. An emptiness-only release
-            therefore fires every tick and the bar is inert at the fleet size
-            the flap was reported on: pcts 92/92, resets 500h/400h, 60 ticks
-            gave `[1, 2, 1, 2]` with the bar on and the identical `[1, 2, 1, 2]`
-            with `lastSwitchFrom` popped every tick.
-
-            "BARRING LEAVES NOTHING" AND "WE ARE FLAPPING" ARE DIFFERENT
-            STATES, and at n=2 they are always the same state — which is how
-            one swallowed the other. The ranking cannot separate them: it sees
-            only the present, and both look like an empty list. What separates
-            them is WHY the ranking flipped. Traced at each leg of that walk:
-
-                t8   1->2   left 1 holding 4.0 pts, 500h out
-                t20  2->1   account 1 still 4.0 pts, still 500h out
-                t22  1->2   account 2 still 2.0 pts, still 400h out
-
-            Every return won because the ACTIVE burned down, never because the
-            target recovered. So the release asks the one question the ranking
-            cannot: is the account we left better than when we left it?
-
-            ON BOTH AXES THE RANKING USES, and with the margins it already
-            uses — ``SPENT_HEADROOM_PCT`` of headroom (below that an edge is
-            under two poll intervals of work) or ``RECOVERY_HYSTERESIS_S``
-            sooner. An account's headroom rises only when a window rolls over
-            and its binding reset only moves nearer when a nearer window
-            starts binding, so both are real events rather than the boundary
-            crossings burn manufactures for free.
-
-            Emptiness still decides whether to ASK. Where the bar leaves a
-            real alternative it simply applies, so a fleet with somewhere else
-            to go is untouched by any of this.
-
-            Cheap: the retry runs only when the barred list came back empty,
-            which is the tick that was about to do nothing anyway.
-            """
-            # Recomputed per snapshot, never once per tick: the consume-first
-            # two-phase commit replaces `headroom` and `active_headroom` and
-            # re-ranks, and the ratio release consumes exactly those two
-            # values. Computed once, the bar answered from a snapshot the
-            # ranking had already thrown away — `left=20 active=30` bars,
-            # `left=90 active=10` releases, and phase 2 is where that flips.
-            recovered = self._left_account_recovered(
-                state,
-                kw["usage"],
-                kw["headroom"],
-                kw["active_headroom"],
-                kw["settings"],
-                kw["now"],
-                kw["current"],
-            )
-            no_return = self._no_return_account(
-                trigger,
-                state,
-                kw["headroom"],
-                kw["active_headroom"],
-                recovered,
-                kw["settings"],
-                kw["current"],
-            )
-            ranked = self._rank_candidates(no_return=no_return, **kw)
-            if no_return is not None and not ranked[0] and recovered:
-                unbarred = self._rank_candidates(no_return=None, **kw)
-                if unbarred[0]:
-                    return unbarred
-            return ranked
-
         decided_now = self.clock()
-        ordered, any_known, active_reset_ts = _rank(
+        ordered, any_known, active_reset_ts = self._rank(
+            state,
             trigger=trigger,
             consume_first=consume_first,
             oauth_candidates=oauth_candidates,
@@ -1441,7 +1459,8 @@ class AutoSwitchEngine:
             headroom = _headroom_by_account(usage, self._models)
             active_headroom = headroom.get(current)
             decided_now = self.clock()
-            ordered, any_known, active_reset_ts = _rank(
+            ordered, any_known, active_reset_ts = self._rank(
+                state,
                 trigger=trigger,
                 consume_first=consume_first,
                 oauth_candidates=oauth_candidates,
@@ -1617,6 +1636,99 @@ class AutoSwitchEngine:
             return TickOutcome.ERROR
         self._emit(NoSwitchEvent(reason="no-viable-target"))
         return TickOutcome.BLOCKED
+
+    def _candidate_pools(
+        self, current: str, quarantined: set[str], settings: AutoSwitchSettings
+    ) -> tuple[list[str], list[str], list[str]]:
+        """``(candidates, oauth_candidates, api_key_candidates)`` for a switch
+        away from ``current``: switchable, not quarantined, not the active."""
+        candidates = [
+            num
+            for num in self.switcher.switchable_account_numbers()
+            if num != current and num not in quarantined
+        ]
+        oauth_candidates = [
+            n for n in candidates if self.switcher.account_kind_for(n) != "api_key"
+        ]
+        api_key_candidates = (
+            [n for n in candidates if self.switcher.account_kind_for(n) == "api_key"]
+            if settings.include_api_key_accounts
+            else []
+        )
+        return candidates, oauth_candidates, api_key_candidates
+
+    def _rank(self, state: dict, **kw):
+        """Rank with the no-return bar, and WITHOUT it if that empties AND
+        the barred account is a different proposition from the one we left.
+
+        Emptiness alone cannot be the release. On two accounts there is
+        exactly one candidate, so barring it ALWAYS empties the list —
+        measured, sweeping active x barred headroom x both reset shapes,
+        `n=2 barred-rank EMPTY=320 NONEMPTY=0`. An emptiness-only release
+        therefore fires every tick and the bar is inert at the fleet size
+        the flap was reported on: pcts 92/92, resets 500h/400h, 60 ticks
+        gave `[1, 2, 1, 2]` with the bar on and the identical `[1, 2, 1, 2]`
+        with `lastSwitchFrom` popped every tick.
+
+        "BARRING LEAVES NOTHING" AND "WE ARE FLAPPING" ARE DIFFERENT
+        STATES, and at n=2 they are always the same state — which is how
+        one swallowed the other. The ranking cannot separate them: it sees
+        only the present, and both look like an empty list. What separates
+        them is WHY the ranking flipped. Traced at each leg of that walk:
+
+            t8   1->2   left 1 holding 4.0 pts, 500h out
+            t20  2->1   account 1 still 4.0 pts, still 500h out
+            t22  1->2   account 2 still 2.0 pts, still 400h out
+
+        Every return won because the ACTIVE burned down, never because the
+        target recovered. So the release asks the one question the ranking
+        cannot: is the account we left better than when we left it?
+
+        ON BOTH AXES THE RANKING USES, and with the margins it already
+        uses — ``SPENT_HEADROOM_PCT`` of headroom (below that an edge is
+        under two poll intervals of work) or ``RECOVERY_HYSTERESIS_S``
+        sooner. An account's headroom rises only when a window rolls over
+        and its binding reset only moves nearer when a nearer window
+        starts binding, so both are real events rather than the boundary
+        crossings burn manufactures for free.
+
+        Emptiness still decides whether to ASK. Where the bar leaves a
+        real alternative it simply applies, so a fleet with somewhere else
+        to go is untouched by any of this.
+
+        Cheap: the retry runs only when the barred list came back empty,
+        which is the tick that was about to do nothing anyway.
+        """
+        # Recomputed per snapshot, never once per tick: the consume-first
+        # two-phase commit replaces `headroom` and `active_headroom` and
+        # re-ranks, and the ratio release consumes exactly those two
+        # values. Computed once, the bar answered from a snapshot the
+        # ranking had already thrown away — `left=20 active=30` bars,
+        # `left=90 active=10` releases, and phase 2 is where that flips.
+        recovered = self._left_account_recovered(
+            state,
+            kw["usage"],
+            kw["headroom"],
+            kw["active_headroom"],
+            kw["settings"],
+            kw["now"],
+            kw["current"],
+        )
+        no_return = self._no_return_account(
+            kw["trigger"],
+            state,
+            kw["headroom"],
+            kw["active_headroom"],
+            recovered,
+            kw["settings"],
+            kw["current"],
+        )
+        ranked = self._rank_candidates(no_return=no_return, **kw)
+        if no_return is not None and not ranked[0] and recovered:
+            unbarred = self._rank_candidates(no_return=None, **kw)
+            if unbarred[0]:
+                return unbarred
+        return ranked
 
     def _no_return_account(
         self,
@@ -2397,6 +2509,17 @@ class AutoSwitchEngine:
             # reader never has to guess.
             state["leftTrigger"] = trigger
             atomic_write_json(self.state_path, state)
+
+        # Outside the state lock (never nest it). Display-only, so a failed
+        # write is logged, not allowed to misreport a switch that happened.
+        from_number = (result.get("from") or {}).get("number")
+        if from_number is not None:
+            try:
+                self._history.record_switch(
+                    state["lastSwitchAt"], int(from_number), int(number)
+                )
+            except Exception as e:
+                _logger.warning("could not record switch history: %r", e)
 
         self._emit(
             SwitchEvent(

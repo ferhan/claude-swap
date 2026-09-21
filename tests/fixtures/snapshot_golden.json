@@ -18,7 +18,17 @@
           "pct": 62.5,
           "resetsAt": "2026-09-20T13:33:43.377897+00:00",
           "countdown": "3h 29m",
-          "clock": "13:33"
+          "clock": "13:33",
+          "history": [
+            {
+              "t": "2026-09-20T09:53:48Z",
+              "pct": 55.0
+            },
+            {
+              "t": "2026-09-20T10:02:18Z",
+              "pct": 62.5
+            }
+          ]
         },
         "sevenDay": {
           "pct": 88.0,
@@ -59,7 +69,8 @@
           "pct": 5.0,
           "resetsAt": "2026-09-20T12:48:12.114530+00:00",
           "countdown": "2h 44m",
-          "clock": "12:48"
+          "clock": "12:48",
+          "history": []
         },
         "sevenDay": {
           "pct": 12.0,
@@ -86,7 +97,8 @@
           "pct": 41.0,
           "resetsAt": "2026-09-20T11:12:05.980112+00:00",
           "countdown": "1h 8m",
-          "clock": "11:12"
+          "clock": "11:12",
+          "history": []
         },
         "scoped": [
           {
@@ -131,5 +143,17 @@
       "usage": null,
       "disabled": true
     }
-  ]
+  ],
+  "autoswitch": {
+    "enabled": true,
+    "threshold": 90.0,
+    "nextCandidateNumber": 2,
+    "switches": [
+      {
+        "at": "2026-09-20T08:03:48Z",
+        "from": 2,
+        "to": 1
+      }
+    ]
+  }
 }

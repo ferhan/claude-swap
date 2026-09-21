@@ -2189,6 +2189,124 @@ class TestSnapshotPublishing:
         assert len(ticks) == 2
 
 
+class TestSnapshotAutoswitchAndHistory:
+    """The engine-only additions: the ``autoswitch`` block and 5h history."""
+
+    def _harness(self, temp_home: Path, *, accounts=3, **kwargs) -> EngineHarness:
+        settings = {k: kwargs.pop(k) for k in list(kwargs) if k != "dry_run"}
+        h = EngineHarness(temp_home, **settings)
+        for n, email in list(
+            {1: "a@example.com", 2: "b@example.com", 3: "c@example.com"}.items()
+        )[:accounts]:
+            h.seed(n, email)
+        h.make_live("a@example.com", 1)
+        self.out = temp_home / "snap.json"
+        h.engine = h._make_engine(snapshot_path=self.out, **kwargs)
+        return h
+
+    def _payload(self) -> dict:
+        return json.loads(self.out.read_text())
+
+    @staticmethod
+    def _tick(h: EngineHarness, usage=None, *, entries=None) -> TickOutcome:
+        """Serve the same rows to the engine AND the snapshot's store read
+        (which, live, sees exactly what the engine's fetches landed)."""
+        if entries is None:
+            entries = {n: _entry_for(v, h.clock.now) for n, v in usage.items()}
+        with patch.object(
+            h.switcher, "_collect_usage_entries",
+            side_effect=lambda info, fetch=None: {
+                str(row[0]): entries.get(str(row[0]), UsageEntry()) for row in info
+            },
+        ):
+            return h.tick_with_entries(entries)
+
+    def test_block_reports_enabled_threshold_and_next_candidate(self, temp_home):
+        h = self._harness(temp_home, threshold=80.0)
+        self._tick(h, {"1": _usage(10), "2": _usage(40), "3": _usage(5)})
+
+        block = self._payload()["autoswitch"]
+        # Below the threshold the engine does not rank; "next" is where it
+        # would go on crossing — the most headroom under the default strategy.
+        assert block == {
+            "enabled": True,
+            "threshold": 80.0,
+            "nextCandidateNumber": 3,
+            "switches": [],
+        }
+
+    def test_next_candidate_is_the_rankings_answer_after_a_switch(self, temp_home):
+        h = self._harness(temp_home)
+        self._tick(h, {"1": _usage(95), "2": _usage(10), "3": _usage(50)})
+
+        payload = self._payload()
+        assert payload["activeAccountNumber"] == 2
+        block = payload["autoswitch"]
+        # From account 2; account 1 is both spent-ish and barred (just left).
+        assert block["nextCandidateNumber"] == 3
+        assert [(s["from"], s["to"]) for s in block["switches"]] == [(1, 2)]
+        assert block["switches"][0]["at"].endswith("Z")
+
+    def test_next_candidate_null_when_no_target(self, temp_home):
+        h = self._harness(temp_home, accounts=1)
+        self._tick(h, {"1": _usage(10)})
+        assert self._payload()["autoswitch"]["nextCandidateNumber"] is None
+
+    def test_next_candidate_uses_the_engine_ranking(self, temp_home):
+        h = self._harness(temp_home)
+        with patch.object(
+            h.engine, "_rank", return_value=(["2"], True, None)
+        ) as rank:
+            self._tick(h, {"1": _usage(10), "2": _usage(40), "3": _usage(5)})
+        assert rank.called
+        assert self._payload()["autoswitch"]["nextCandidateNumber"] == 2
+
+    def test_poll_only_reports_disabled(self, temp_home):
+        h = self._harness(temp_home, enabled=False)
+        self._tick(h, {"1": _usage(95), "2": _usage(10), "3": _usage(50)})
+        payload = self._payload()
+        assert payload["autoswitch"]["enabled"] is False
+        assert payload["autoswitch"]["switches"] == []
+        assert payload["activeAccountNumber"] == 1
+
+    def test_history_records_each_measurement_once(self, temp_home):
+        h = self._harness(temp_home)
+        self._tick(h, {"1": _usage(10), "2": _usage(20), "3": _usage(30)})
+        history_file = h.switcher.backup_dir / "usage_history.json"
+        first = history_file.read_text()
+
+        # Same measurements (fetched_at unchanged): nothing new lands.
+        entries = {
+            n: UsageEntry(last_good=_usage(p), fetched_at=h.clock.now, age_s=0.0)
+            for n, p in (("1", 10), ("2", 20), ("3", 30))
+        }
+        h.clock.advance(60)
+        self._tick(h, entries=entries)
+        assert history_file.read_text() == first
+
+        h.clock.advance(600)
+        self._tick(h, {"1": _usage(15), "2": _usage(20), "3": _usage(30)})
+        five = self._payload()["accounts"][0]["usage"]["fiveHour"]
+        assert [p["pct"] for p in five["history"]] == [10.0, 15.0]
+        assert all(p["t"].endswith("Z") for p in five["history"])
+
+    def test_history_survives_a_backend_restart(self, temp_home):
+        h = self._harness(temp_home)
+        self._tick(h, {"1": _usage(10), "2": _usage(20), "3": _usage(30)})
+        h.hand_off_engine_lock()
+        h.engine = h._make_engine(snapshot_path=self.out)
+        h.clock.advance(600)
+        self._tick(h, {"1": _usage(12), "2": _usage(20), "3": _usage(30)})
+        five = self._payload()["accounts"][0]["usage"]["fiveHour"]
+        assert [p["pct"] for p in five["history"]] == [10.0, 12.0]
+
+    def test_dry_run_writes_no_history(self, temp_home):
+        h = self._harness(temp_home, dry_run=True)
+        self._tick(h, {"1": _usage(95), "2": _usage(10), "3": _usage(50)})
+        assert not (h.switcher.backup_dir / "usage_history.json").exists()
+        assert self._payload()["autoswitch"]["switches"] == []
+
+
 class TestEventsShape:
     def test_every_event_has_envelope(self, harness):
         harness.tick_with_usage({"1": _usage(95), "2": _usage(10), "3": _usage(50)})

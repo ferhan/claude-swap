@@ -146,6 +146,20 @@ The schema is pinned by a golden fixture, `tests/fixtures/snapshot_golden.json`,
 asserted from both sides — a Python test against the producer and a Swift test
 against the decoder. A field renamed on either side fails both.
 
+Changes are additive only; `schemaVersion` stays 1 while old readers keep
+decoding. Two additions are backend-sourced:
+
+- `accounts[].usage.fiveHour.history` — `[{t, pct}]`, 24h, oldest first, at
+  most one point per 5 minutes. Kept in `usage_history.json` (backup dir,
+  0600, own file lock), which the engine appends to whenever a new 5h
+  measurement is in the store; it survives backend restarts. `cswap snapshot`
+  reads it too.
+- top-level `autoswitch` — `enabled`, the effective `threshold`,
+  `nextCandidateNumber` (the engine's own `_rank` asked "who if you had to
+  switch now", from where the tick left off) and 24h of real `switches`
+  (`{at, from, to}`, same history file). Engine state, so only the
+  engine-published file carries it; the one-shot `cswap snapshot` omits it.
+
 ## How surfaces stay current
 
 A change can originate anywhere: you type `cswap switch` in a terminal, you add

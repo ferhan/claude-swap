@@ -19,6 +19,15 @@ Two deliberate differences from the ``--list --json`` row:
 
 Raw ``resetsAt`` survives every projection, so a widget counts down live
 without calling back in.
+
+Additive fields (no schema bump; old readers ignore them):
+
+* ``usage.fiveHour.history`` — 24h of 5h-window samples from the backend's
+  ``usage_history`` store, present whenever the payload was built with history
+  (the engine's file and ``cswap snapshot`` both are).
+* top-level ``autoswitch`` — engine state (enabled, effective threshold, next
+  candidate, 24h of switches). Only the engine can answer it, so only the
+  engine-published file carries it; ``cswap snapshot`` omits the key.
 """
 
 from __future__ import annotations
@@ -41,6 +50,7 @@ from claude_swap.json_output import (
 from claude_swap.models import AccountSnapshot, AccountsSnapshot
 from claude_swap.snapshot_source import SnapshotSource
 from claude_swap.switcher import ClaudeAccountSwitcher
+from claude_swap.usage_history import UsageHistory
 
 
 SNAPSHOT_FILENAME = "snapshot.json"
@@ -73,7 +83,9 @@ def _rolled_usage(usage: dict, now: float) -> dict:
     return out
 
 
-def _account_row(acc: AccountSnapshot, now: float) -> dict:
+def _account_row(
+    acc: AccountSnapshot, now: float, history: list | None = None
+) -> dict:
     """One account's row: the aggregate's fields plus its projected usage."""
     entry = acc.usage
     value = entry.sentinel if entry.sentinel else entry.last_good
@@ -85,6 +97,10 @@ def _account_row(acc: AccountSnapshot, now: float) -> dict:
             # The menu bar's "(!)" marker — a maxed per-model limit is the usual
             # reason to switch, and it outranks the ahead-of-pace marker.
             window["maxed"] = window["pct"] >= 100
+        if history is not None and "fiveHour" in usage:
+            usage["fiveHour"]["history"] = [
+                {"t": iso_timestamp(t), "pct": pct} for t, pct in history
+            ]
     row = {
         "number": int(acc.number),
         "email": acc.email,
@@ -106,21 +122,46 @@ def _account_row(acc: AccountSnapshot, now: float) -> dict:
     return row
 
 
-def snapshot_payload(snap: AccountsSnapshot) -> dict:
+def snapshot_payload(
+    snap: AccountsSnapshot,
+    *,
+    history: dict[str, list] | None = None,
+    autoswitch: dict | None = None,
+) -> dict:
     """Project an ``AccountsSnapshot`` to the schema-v1 snapshot payload.
 
     Pure: ``snap.taken_at`` is the only clock, so the roll-forward and the
-    payload's own ``takenAt`` can never disagree.
+    payload's own ``takenAt`` can never disagree. ``history`` is
+    ``{number: [(t, pct), ...]}`` (see ``UsageHistory.five_hour``); when given,
+    every ``fiveHour`` window carries a ``history`` list (empty if the account
+    has none). ``autoswitch`` is the engine's block, emitted verbatim.
     """
     now = snap.taken_at
-    return {
+    payload = {
         "schemaVersion": SCHEMA_VERSION,
         "takenAt": iso_timestamp(now),
         "activeAccountNumber": (
             int(snap.active_number) if snap.active_number is not None else None
         ),
-        "accounts": [_account_row(acc, now) for acc in snap.accounts],
+        "accounts": [
+            _account_row(
+                acc,
+                now,
+                None if history is None else history.get(acc.number, []),
+            )
+            for acc in snap.accounts
+        ],
     }
+    if autoswitch is not None:
+        payload["autoswitch"] = autoswitch
+    return payload
+
+
+def history_for(backup_dir: Path, snap: AccountsSnapshot) -> dict[str, list]:
+    """The stored 5h history for the accounts in ``snap`` (read-only)."""
+    return UsageHistory(backup_dir).five_hour(
+        {acc.number: acc.email for acc in snap.accounts}, snap.taken_at
+    )
 
 
 def take_snapshot(switcher: ClaudeAccountSwitcher) -> dict:
@@ -132,7 +173,8 @@ def take_snapshot(switcher: ClaudeAccountSwitcher) -> dict:
     able to produce network traffic the menu bar could not. Blocking (file
     locks, keychain, network).
     """
-    return snapshot_payload(SnapshotSource(switcher).take())
+    snap = SnapshotSource(switcher).take()
+    return snapshot_payload(snap, history=history_for(switcher.backup_dir, snap))
 
 
 def write_snapshot(path: Path, payload: dict) -> None:
