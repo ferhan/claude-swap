@@ -87,6 +87,15 @@ final class AccountSwitchTests: XCTestCase {
         XCTAssertEqual(resolve(active: 3, pending, after: 2), .idle)
     }
 
+    /// `SwitchAccountIntent` returns without waiting for the backend (see
+    /// `AutoswitchToggleTests`): the reload it asks for runs against a
+    /// snapshot that still has the old account active, and must already draw
+    /// "Switching…".
+    func testSwitchingShowsAtOnceWithNoTimeForTheBackend() {
+        let pending = PendingSwitch(target: 3, requestedAt: now, delivered: true)
+        XCTAssertEqual(resolve(active: 1, pending, after: 0), .switching(target: 3))
+    }
+
     func testTimeoutShowsNotAppliedThenClears() {
         let pending = PendingSwitch(target: 3, requestedAt: now, delivered: true)
         XCTAssertEqual(resolve(active: 1, pending, after: 29.9), .switching(target: 3))

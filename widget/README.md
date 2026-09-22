@@ -26,7 +26,13 @@ directory it may write, for the backend to apply.
 
 The host app here is a stub whose job is to be the container the widget
 extension ships inside (WidgetKit extensions cannot be installed standalone),
-and to run `cswap service start` when the widget's Start control asks.
+and to run `cswap service start` when the widget's Start control asks. **It
+has no user interface at all** -- no window, no menu, no alert, no Dock icon.
+Every launch either answers a question and exits or does its work and quits.
+That is structural, not an omission: a tap on a widget region that carries no
+control falls through to LaunchServices as a plain launch of this app, so the
+only way a tap can never summon a window is for there to be no window to
+summon.
 
 ## Prerequisites
 
@@ -178,12 +184,17 @@ a custom `ToggleStyle` -- a capsule holding the label, a filled state dot
 out-of-process renderer can draw, and came out as the yellow "unsupported
 view" placeholder.
 
-Dot, words and pending mark all come from one resolved value
-(`ToggleResolution`), never from the `Toggle`'s own binding: WidgetKit flips
-that binding optimistically on tap, which showed a green dot beside a label
-still reading "Off" whenever no backend ever confirmed. With the snapshot
-stale the chip is drawn inert and tapping it writes nothing -- the header's
-"Start backend" is the action that matters then.
+Dot and words come from one value, so they can never disagree: the `Toggle`'s
+own binding, which is the resolved state (`ToggleResolution`) until a tap and
+WidgetKit's optimistic flip for the second after it. An earlier version bound
+only the dot to it and left the words on the resolved state, which showed a
+green dot beside a label still reading "Off"; the answer is to feed both from
+the same side, not to throw the optimistic flip away. It is the only feedback
+there is in the gap between the tap and the reload that confirms it, and
+without it the chip needed two clicks to look like it had done anything (see
+"Why a tap must not wait"). With the snapshot stale the chip is drawn inert
+and tapping it writes nothing -- the header's "Start backend" is the action
+that matters then.
 
 Tapping it runs
 `SetAutoswitchIntent` in the extension, which writes
@@ -238,6 +249,43 @@ too, because that one spot is the only place either size can offer a start;
 large and extra-large keep their own state there, since their header already
 carries the chip. Logic: `Shared/AccountSwitch.swift`.
 
+## Why a tap must not wait
+
+Neither intent waits for the backend. Both used to: after writing the request
+they polled the snapshot for up to 2s, so the reload that followed would draw
+the confirmed state rather than the pending one. That is what made the
+auto-switch chip "need two clicks".
+
+chronod pauses a widget's reloads for as long as an intent's `perform` runs,
+and only once it returns does it re-render — every size the widget is placed
+in, one after another. NotificationCenter swaps the drawing in when the whole
+batch is done. Measured on a tap that was applied in a second
+(`log show --predicate 'subsystem BEGINSWITH "com.apple.chrono"'`):
+
+```
+09:05:52.124  tap                     Handle action: SetAutoswitchIntent
+09:05:52.125  reloads paused          Reload state reload -> paused
+09:05:53.182  perform returned        1.06s, all of it the poll
+09:05:53.248  reload: begin
+09:05:53.364  small archived          ... medium 53.608, large 53.878,
+09:05:54.314  extra-large archived        four sizes, ~1.1s
+09:05:54.328  desktop finally redrew  2.2s after the tap
+```
+
+The user's second tap came at 09:05:54.320 — eight milliseconds before the
+first one showed. And because the intent it carried was archived in the
+pre-tap rendering, it asked for the same value again, so the pattern in the
+backend's log was `off, off, on, on`: every second tap a no-op. A
+`SelectAccountIntent`, whose `perform` is 8ms, redrew in ~600ms and never had
+the problem — which is why only this chip was reported.
+
+So: write the request, remember it, return. The pending state
+(`ToggleResolution.isPending`, `SwitchState.switching`) exists precisely so
+nothing has to be waited for — the chip draws what was asked for, marked
+pending, until the snapshot agrees or the request times out. `Toggle`'s
+optimistic flip covers the render batch on top of that, so the chip answers
+the tap in the same frame.
+
 ## Start backend
 
 When the snapshot is more than 3 minutes old the header reads "Backend
@@ -259,9 +307,8 @@ picks; `OpenURLIntent` is macOS 15+. It is the only `Link` in the widget --
 the stray-tap catcher behind everything is still a `RefreshIntent` button, so
 a tap that misses every control still does not open the app.
 
-The host app (`App/HostMain.swift`) is `LSUIElement`, so it never shows a Dock
-icon unless the user opens it directly (then it switches to a regular app for
-as long as its info window is up). On the start URL it:
+The host app (`App/HostMain.swift`) is `LSUIElement` and never shows a Dock
+icon, a window or a menu on any path. On the start URL it:
 
 1. drops `widget-requests/.backend-starting` (`{"at": ...}`; a dotfile, which
    the backend leaves alone), creating the directory 0700 if it is missing,
@@ -278,7 +325,7 @@ as long as its info window is up). On the start URL it:
    `.backend-starting` first, so a finished start never leaves the widget on
    "Starting…".
 
-**Nothing is ever drawn on this path** -- no window, no alert. The tap came
+**Nothing is ever drawn, on this path or any other.** The tap came
 from a widget, so the answer belongs in the widget: while the snapshot is
 still stale the Start control reads the failure marker and becomes
 "Start failed · Retry" (`Failed · Retry`, and on small's 62pt a single Retry
@@ -287,12 +334,29 @@ clears on a fresh snapshot, on the next attempt, or after 3 minutes. Large and
 extra-large drop the "Backend stopped" wording while it shows, since the
 control already says it.
 
-That is also why a launch that says it is plain waits a moment before opening
-the info window: `launchIsDefaultUserInfoKey` is missing on a cold URL launch
-(which reads as "plain") and the URL event can arrive after
-`applicationDidFinishLaunching`, so deciding at that moment put the info window
-in front of a Start tap -- the backend did start, the window just made it look
-as if nothing had happened. An unknown URL now quits without drawing anything.
+There used to be an info window for a plain launch, saying the app was only a
+container. It is gone. A stray tap on a widget region that carries no control
+is delivered by WidgetKit as a plain launch of the container app with no URL
+(`Launching with no widgetURL` in NotificationCenter's log), so any window on
+that path is a popup a widget tap can summon -- which it did, from large, even
+with the `RefreshIntent` catcher in place. Nothing that only exists to say "I
+am a stub" is worth that, and a catcher can only ever be a patch: the launch
+path stays open however good the coverage is.
+
+What a launch does now:
+
+| launched by | what happens |
+| --- | --- |
+| `--placed-widgets` | prints the count, exits; no `NSApplication` at all |
+| `claudeswap://start-backend` | runs cswap, writes its markers, quits |
+| any other URL | one log line, quits |
+| a stray widget tap, Finder, `open -a` | one log line, quits after 1s |
+
+That last second is the URL grace: `launchIsDefaultUserInfoKey` is missing on
+a cold URL launch (which reads as "plain") and the URL event can arrive after
+`applicationDidFinishLaunching`, so quitting at that moment would kill a Start
+tap before its URL was delivered. Double-clicking `ClaudeSwap.app` in Finder
+therefore does nothing visible and leaves nothing running.
 
 The host has no window to report in, so it logs: a line per launch and per
 start to `widget-requests/.host.log` (trimmed to the last 200 lines past 64KB)
@@ -383,8 +447,7 @@ Archive, export, DMG, notarization and stapling are written but unrun.
 project.yml                              XcodeGen spec — the real project definition
 build-widget                             install / uninstall / release
 Signing.xcconfig.example                 template for the gitignored Team ID file
-App/HostMain.swift                       entry point; `--placed-widgets`; claudeswap://start-backend
-App/CswapWidgetHostApp.swift             stub info window (plain launches only)
+App/HostMain.swift                       entry point; `--placed-widgets`; claudeswap://start-backend; no UI
 App/CswapWidgetHost.entitlements         no sandbox (see "Start backend")
 Shared/Snapshot.swift                    schema-v1 decoding (shared with the tests)
 Shared/Display.swift                     pure display logic: ramp, severity, formatting, small's paging
@@ -523,8 +586,11 @@ On every size, a tap that misses every control reloads the widget
 (`RefreshIntent`) rather than launching the stub host app. The catcher sits
 behind the whole widget rect -- content margins are disabled, so that includes
 the padding ring -- because there is no `widgetURL` and WidgetKit's default
-for an uncaught tap is to open the container app, whose only window says it
-is a container. The one `Link`, "Start backend", opens the host on purpose.
+for an uncaught tap is to open the container app. It catches nearly all of
+them, but not every one: a tap that lands while NotificationCenter is between
+archives finds no interaction region at all and falls through to that default
+(`Launching with no widgetURL`), which is what the host app having no window
+is for. The one `Link`, "Start backend", opens the host on purpose.
 
 The trend's time axis spans the history actually held: from the oldest sample
 or auto-switch (at most 24h back) to now, never narrower than an hour, with

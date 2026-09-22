@@ -212,15 +212,14 @@ struct SetAutoswitchIntent: SetValueIntent {
         let delivered = (try? AutoswitchRequest.write(enabled: value, at: now,
                                                       into: SnapshotFile.requestsDirectory)) != nil
         AutoswitchStore.set(PendingToggle(desired: value, requestedAt: now, delivered: delivered))
-        if delivered {
-            // The backend applies a request within about a second. Wait that
-            // long for it, so the reload that follows usually draws the
-            // confirmed state rather than the pending one.
-            for _ in 0..<8 {
-                try? await Task.sleep(for: .milliseconds(250))
-                if SnapshotFile.load()?.autoswitch?.enabled == value { break }
-            }
-        }
+        // Return at once. This used to wait up to 2s for the backend to apply
+        // the request so the reload would draw the confirmed state -- but
+        // chronod pauses the widget's reloads for as long as `perform` runs,
+        // and only then re-renders all four sizes (~1.1s), so the desktop
+        // showed the pre-tap drawing for over two seconds and the tap read as
+        // ignored. The pending state exists exactly so no wait is needed: the
+        // chip draws what was asked for, marked pending, until the snapshot
+        // agrees or the request times out.
         WidgetCenter.shared.reloadTimelines(ofKind: CswapWidget.kind)
         return .result()
     }
@@ -272,14 +271,9 @@ struct SwitchAccountIntent: AppIntent {
         let delivered = askable
             && (try? SwitchRequest.write(to: number, at: now, into: SnapshotFile.requestsDirectory)) != nil
         SwitchStore.set(PendingSwitch(target: number, requestedAt: now, delivered: delivered))
-        if delivered {
-            // Give the backend its ~1s to apply it, so the reload usually
-            // draws the result rather than "Switching…".
-            for _ in 0..<8 {
-                try? await Task.sleep(for: .milliseconds(250))
-                if SnapshotFile.load()?.activeAccountNumber == number { break }
-            }
-        }
+        // No wait here either, for the reason `SetAutoswitchIntent` gives:
+        // every second `perform` spends is a second the widget cannot redraw.
+        // "Switching…" now, and the result when the snapshot brings it.
         WidgetCenter.shared.reloadTimelines(ofKind: CswapWidget.kind)
         return .result()
     }

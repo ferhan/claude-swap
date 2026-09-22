@@ -6,10 +6,13 @@ import WidgetKit
 /// The auto-switch chip: the label, a filled state dot and the state in
 /// words, on one capsule.
 ///
-/// Everything here is drawn from `isOn`/`isDisabled` -- the resolved state --
-/// and never from a `Toggle`'s own binding. WidgetKit flips that binding
-/// optimistically the moment it is tapped, so a dot bound to it went green
-/// beside a label still reading "Off" whenever the backend never confirmed.
+/// The dot and the words both come from `isOn` -- one value, so they cannot
+/// disagree. That is the whole rule here. An earlier version bound only the
+/// dot to the `Toggle`'s own binding, which WidgetKit flips optimistically
+/// the moment it is tapped, and left the words on the resolved state: the dot
+/// went green beside a label still reading "Off". The answer is to feed both
+/// from the same value, not to throw the optimistic flip away -- it is the
+/// only feedback available in the second or so before a reload can land.
 ///
 /// SwiftUI shapes and text rather than `.toggleStyle(.switch)`: AppKit's
 /// switch is not one of the controls a widget's out-of-process renderer can
@@ -64,16 +67,23 @@ struct AutoswitchChip: View {
     }
 }
 
-/// Draws the chip with the resolved state, ignoring the configuration the
-/// `Toggle` hands in (see `AutoswitchChip`).
+/// Draws the chip from the configuration the `Toggle` hands in, which is the
+/// resolved state until the moment of a tap and WidgetKit's optimistic flip
+/// for the second or so after it -- the gap between the tap and the reload
+/// that confirms it. Both words are given up front so the dot and the label
+/// always come from the same side (see `AutoswitchChip`).
 struct AutoswitchChipStyle: ToggleStyle {
-    let resolved: ToggleResolution
-    let stateText: String
+    /// `at 90%` / `90%`: what the chip says when it is on.
+    let onText: String
+    /// `Off`.
+    let offText: String
     var compact = false
     var symbol = "arrow.triangle.2.circlepath"
 
     func makeBody(configuration: Configuration) -> some View {
-        AutoswitchChip(isOn: resolved.isOn, stateText: stateText, compact: compact, symbol: symbol)
+        AutoswitchChip(isOn: configuration.isOn,
+                       stateText: configuration.isOn ? onText : offText,
+                       compact: compact, symbol: symbol)
     }
 }
 
@@ -87,20 +97,20 @@ struct CompactAutoControl: View {
 
     var body: some View {
         if let auto = context.snapshot.autoswitch, let toggle = context.toggle {
-            let stateText = toggle.isOn ? Format.pct(auto.threshold) : "Off"
+            let onText = Format.pct(auto.threshold)
             let symbol = symbol(toggle)
             if toggle.isDisabled {
-                AutoswitchChip(isOn: toggle.isOn, stateText: stateText, isDisabled: true,
-                               compact: true, symbol: symbol)
+                AutoswitchChip(isOn: toggle.isOn, stateText: toggle.isOn ? onText : "Off",
+                               isDisabled: true, compact: true, symbol: symbol)
                     .accessibilityLabel("Auto-switch \(toggle.isOn ? "on" : "off"), backend stopped")
             } else {
                 Toggle(isOn: toggle.isOn, intent: SetAutoswitchIntent(enabled: !toggle.isOn)) {
                     EmptyView()
                 }
-                .toggleStyle(AutoswitchChipStyle(resolved: toggle, stateText: stateText,
+                .toggleStyle(AutoswitchChipStyle(onText: onText, offText: "Off",
                                                  compact: true, symbol: symbol))
                 .fixedSize()
-                .accessibilityLabel(label(toggle, stateText: stateText))
+                .accessibilityLabel(label(toggle, stateText: onText))
             }
         }
     }
@@ -130,17 +140,18 @@ struct AutoStatusLine: View {
     var body: some View {
         HStack(spacing: 6) {
             if let auto = context.snapshot.autoswitch, let toggle = context.toggle {
-                let stateText = toggle.isOn ? "at \(Format.pct(auto.threshold))" : "Off"
+                let onText = "at \(Format.pct(auto.threshold))"
                 if toggle.isDisabled {
-                    AutoswitchChip(isOn: toggle.isOn, stateText: stateText, isDisabled: true)
+                    AutoswitchChip(isOn: toggle.isOn, stateText: toggle.isOn ? onText : "Off",
+                                   isDisabled: true)
                         .accessibilityLabel("Auto-switch \(toggle.isOn ? "on" : "off"), backend stopped")
                 } else {
                     Toggle(isOn: toggle.isOn, intent: SetAutoswitchIntent(enabled: !toggle.isOn)) {
                         EmptyView()
                     }
-                    .toggleStyle(AutoswitchChipStyle(resolved: toggle, stateText: stateText))
+                    .toggleStyle(AutoswitchChipStyle(onText: onText, offText: "Off"))
                     .fixedSize()
-                    .accessibilityLabel("Auto-switch \(toggle.isOn ? "on, \(stateText)" : "off")")
+                    .accessibilityLabel("Auto-switch \(toggle.isOn ? "on, \(onText)" : "off")")
                 }
                 if toggle.isPending {
                     Label("applying…", systemImage: "clock").labelStyle(.titleAndIcon).fixedSize()

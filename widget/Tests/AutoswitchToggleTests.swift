@@ -61,6 +61,19 @@ final class AutoswitchToggleTests: XCTestCase {
                        ToggleResolution(isOn: false, isPending: true, backendNotRunning: false))
     }
 
+    /// `SetAutoswitchIntent` drops the request and returns without waiting
+    /// for the backend, because chronod holds the widget's reloads for as
+    /// long as the intent runs. The reload that follows is therefore always
+    /// against a snapshot that has not been applied yet, and it has to draw
+    /// the asked-for state from the very first instant -- otherwise the tap
+    /// reads as ignored and the user taps again.
+    func testAskedForValueShowsAtOnceWithNoTimeForTheBackend() {
+        XCTAssertEqual(resolve(snapshot: true, PendingToggle(desired: false, requestedAt: now, delivered: true)),
+                       ToggleResolution(isOn: false, isPending: true, backendNotRunning: false))
+        XCTAssertEqual(resolve(snapshot: false, PendingToggle(desired: true, requestedAt: now, delivered: true)),
+                       ToggleResolution(isOn: true, isPending: true, backendNotRunning: false))
+    }
+
     func testSnapshotAgreeingSettlesIt() {
         let pending = PendingToggle(desired: false, requestedAt: now, delivered: true)
         XCTAssertEqual(resolve(snapshot: false, pending, after: 1),
