@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -35,6 +37,7 @@ from claude_swap.json_output import (
     USAGE_FOREIGN_CREDENTIAL,
     USAGE_TOKEN_EXPIRED,
 )
+from claude_swap.usage_history import UsageHistory
 from claude_swap.usage_store import FetchRecord, UsageEntry
 from claude_swap.models import Platform
 from claude_swap.settings import AutoSwitchSettings, set_setting
@@ -7415,3 +7418,121 @@ class TestBackendEventStream:
         log.write_text("14:03:11  Account-1: 42% used\nTraceback…\n", encoding="utf-8")
         reader = BackendEventLog(log, backfill=5)
         assert reader.poll() == []
+
+
+class TestManualSwitchesStartTheCooldown:
+    """Every hand switch (CLI, menu bar, TUI, widget) starts the same
+    cooldown the engine keeps after its own switches, so the next tick does
+    not undo the user's pick. Recorded in ``_perform_switch``, so no surface
+    carries its own copy.
+    """
+
+    @staticmethod
+    def _switch_by_hand(h: EngineHarness, number: str) -> None:
+        """What `cswap switch N` runs, on the harness's own clock."""
+        h.clock.now = time.time()   # manual records wall time, like the CLI
+        h.switcher.switch_to(number, json_output=True)
+
+    def test_a_manual_switch_records_only_the_cooldown(self, harness):
+        harness.engine._mutate_state(
+            lambda s: s.update(quarantine={"3": {"reason": "dead"}})
+        )
+        self._switch_by_hand(harness, "2")
+
+        state = harness.state()
+        assert state["lastSwitchAt"] == pytest.approx(time.time(), abs=10)
+        # Not the engine's own bookkeeping: the no-return bar stays disarmed
+        # by a hand switch, and the pre-existing state survives.
+        assert "lastSwitchTo" not in state and "lastSwitchFrom" not in state
+        assert state["quarantine"] == {"3": {"reason": "dead"}}
+        # The chart's switch markers mean auto-switches.
+        assert UsageHistory(harness.switcher.backup_dir).switches(time.time()) == []
+
+    def test_the_engine_leaves_a_manual_pick_alone_until_the_cooldown_lapses(
+        self, harness
+    ):
+        self._switch_by_hand(harness, "2")
+        over_threshold = {"1": _usage(10), "2": _usage(95), "3": _usage(10)}
+
+        assert harness.tick_with_usage(over_threshold) is TickOutcome.NO_ACTION
+        assert [
+            e.reason for e in harness.events if isinstance(e, NoSwitchEvent)
+        ] == ["cooldown"]
+        assert harness.active_number() == 2
+
+        harness.clock.advance(400)  # past the 300s default cooldown
+        assert harness.tick_with_usage(over_threshold) is TickOutcome.SWITCHED
+        assert harness.active_number() != 2
+
+    def test_an_at_limit_active_still_moves_during_a_manual_cooldown(self, harness):
+        self._switch_by_hand(harness, "2")
+        outcome = harness.tick_with_usage({
+            "1": _usage(10), "2": _usage(100), "3": _usage(50),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert next(
+            e for e in harness.events if isinstance(e, SwitchEvent)
+        ).trigger == "at-limit"
+
+    def test_failover_still_moves_during_a_manual_cooldown(self, harness):
+        self._switch_by_hand(harness, "2")
+        unreadable = {"1": _usage(10), "2": None, "3": _usage(50)}
+        assert harness.tick_with_usage(unreadable) is TickOutcome.NO_ACTION
+        assert harness.tick_with_usage(unreadable) is TickOutcome.NO_ACTION
+        assert harness.tick_with_usage(unreadable) is TickOutcome.SWITCHED
+        assert next(
+            e for e in harness.events if isinstance(e, SwitchEvent)
+        ).trigger == "failover"
+
+    def test_the_engines_own_switch_is_unchanged(self, harness):
+        with patch("claude_swap.autoswitch.record_manual_switch") as record:
+            outcome = harness.tick_with_usage({
+                "1": _usage(95), "2": _usage(10), "3": _usage(50),
+            })
+        assert outcome is TickOutcome.SWITCHED
+        record.assert_not_called()      # the engine writes its own state
+        state = harness.state()
+        assert state["lastSwitchAt"] == harness.clock()
+        assert state["lastSwitchTo"] == "2" and state["lastSwitchFrom"] == 1
+        assert len(UsageHistory(harness.switcher.backup_dir).switches(
+            harness.clock()
+        )) == 1
+
+    def test_a_no_op_switch_starts_no_cooldown(self, harness):
+        harness.switcher.switch_to("1", json_output=True)   # already active
+        assert harness.state() == {}
+
+    def test_a_rotation_starts_the_cooldown_too(self, harness):
+        harness.clock.now = time.time()
+        harness.switcher.switch(json_output=True)
+        assert harness.active_number() == 2
+        assert harness.state()["lastSwitchAt"] == pytest.approx(time.time(), abs=10)
+
+    def test_a_widget_switch_request_gets_it_through_the_shared_path(self, harness):
+        from claude_swap import widget_requests
+
+        backup = harness.switcher.backup_dir
+        now = time.time()
+        harness.clock.now = now
+        path = widget_requests.ensure_requests_dir(backup) / (
+            f"switch-{int(now * 1000)}.json"
+        )
+        path.write_text(json.dumps({"switch": {"to": 2}, "at": _iso_at(now)}))
+
+        assert widget_requests.apply_switch_request(
+            backup, lambda: harness.switcher, now=now
+        ) is True
+        assert harness.state()["lastSwitchAt"] == pytest.approx(now, abs=10)
+
+    def test_the_cli_switch_path_gets_it(self, harness):
+        from claude_swap import cli
+
+        harness.clock.now = time.time()
+        with patch(
+            "claude_swap.cli.ClaudeAccountSwitcher", return_value=harness.switcher
+        ), patch.object(sys, "argv", ["claude-swap", "switch", "2", "--json"]), \
+             patch("os.geteuid", return_value=1000, create=True), \
+             patch("claude_swap.update_check.check_for_update", return_value=None):
+            cli.main()
+        assert harness.active_number() == 2
+        assert harness.state()["lastSwitchAt"] == pytest.approx(time.time(), abs=10)

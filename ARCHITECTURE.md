@@ -261,8 +261,9 @@ auto-switching is one policy it may apply, governed by `autoswitch.enabled`,
 Installing the backend is therefore not opting into automatic switching.
 Manual switching (`cswap switch`, `cswap run`, the menu bar's account list)
 always works; the engine has explicit handling for a switch that happened
-underneath it, and persists cooldown timestamps across processes so it cannot
-ping-pong against you.
+underneath it, persists cooldown timestamps across processes so it cannot
+ping-pong against you, and starts that same cooldown for a manual switch (see
+[Widget requests](#widget-requests)) so it does not undo your pick.
 
 `enabled = false` is deliberately **not** the same as `--dry-run`. Dry-run
 writes nothing at all, because it is previewing someone else's run — so it
@@ -399,14 +400,21 @@ Switched to Account-N (email), from Account-M (requested …)`) and wakes the
 engine, which republishes the snapshot with the new `activeAccountNumber`
 within about a second.
 
-It gets the same engine treatment as `cswap switch`, which is **no cooldown**:
-the engine's `lastSwitchAt` cooldown is written only by the engine's own
-switches, and a manual switch never touches `autoswitch_state.json`. What
-protects a manual pick today is the policy itself — the engine does not move
-off an account below the threshold (except under `consume-first`, which may),
-and a manual switch disarms the no-return bar rather than tripping it. A
-manual pick at or above the threshold with auto on will be moved off on the
-next tick; for the widget that tick comes at once, because of the wake.
+It gets the same engine treatment as `cswap switch`, which is **the
+cooldown**: every manual switch — CLI, menu bar, TUI, widget request — writes
+`lastSwitchAt` into `autoswitch_state.json`, so the engine leaves the pick
+alone for `cooldown_seconds` (default 300) the way it leaves its own switches
+alone. The recording lives in `ClaudeAccountSwitcher._perform_switch`, the one
+path every surface's switch goes through, and runs after that path's locks are
+released (lock order is state lock, then switch lock); the engine passes
+`manual=False` because it writes its own bookkeeping under the state lock it
+already holds. Only `lastSwitchAt` is written: `lastSwitchTo`/`lastSwitchFrom`
+stay the engine's, so a hand switch still *disarms* the no-return bar instead
+of tripping it, and the switch does not enter `autoswitch.switches` history —
+those chart markers mean auto-switches. The cooldown gates the `proactive` and
+`consume-first` triggers only, so `at-limit` and `failover` still move off an
+account that is exhausted or unreadable. A no-op switch (already on that
+account) records nothing.
 
 The menu bar agent is a surface, not the backend, and outlives Quit: its plist
 stays, so it returns at login. *Open at Login* in its menu deletes or rewrites
@@ -528,8 +536,6 @@ Not built:
   log path anyone else knows. A hand-run `cswap auto` shows as EXTERNAL, and
   its decisions stay in its own terminal.
 - `cswap widget install` — no install path exists; the widget is built by hand
-- a cooldown for manual switches (CLI, menu bar, widget): the engine's
-  cooldown covers only its own switches — see [Widget requests](#widget-requests)
 - cross-process `wake()`
 
 Untested:

@@ -316,9 +316,13 @@ Also check:
   found …`; a disabled account → `refused … is disabled`; the active account
   → `switch request to N: Already on Account-N …`. The file is deleted every
   time.
-- with auto on and the target at or above the threshold, the engine moves off
-  it on the woken tick. Expected: manual switches get no cooldown (see
-  ARCHITECTURE, Widget requests).
+- with auto on and the target at or above the threshold, the engine does
+  **not** move off it on the woken tick: the manual switch started the
+  cooldown (default 300s). Expected: `jq .lastSwitchAt
+  ~/.claude-swap-backup/autoswitch_state.json` is the switch's timestamp, the
+  backend log shows `no switch: cooldown`, and after the cooldown lapses the
+  next tick switches (see ARCHITECTURE, Widget requests). An account at 100%
+  still moves at once (`at-limit`).
 
 ### Start backend (`cswap service start`)
 

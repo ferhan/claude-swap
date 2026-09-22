@@ -71,6 +71,7 @@ from claude_swap.usage_history import UsageHistory
 from claude_swap.usage_store import due_candidate, plan_oversleeps_interval
 
 STATE_FILENAME = "autoswitch_state.json"
+STATE_LOCK_FILENAME = ".autoswitch_state.lock"
 STATE_SCHEMA_VERSION = 1
 
 _logger = logging.getLogger("claude-swap")
@@ -760,6 +761,34 @@ def _headroom_by_account(
     }
 
 
+def record_manual_switch(backup_dir: Path, now: float | None = None) -> None:
+    """Start the engine's cooldown for a switch the user made by hand.
+
+    Called by the switcher after every successful manual switch (CLI, menu
+    bar, TUI, widget request) so the engine leaves the user's pick alone for
+    ``cooldown_seconds`` -- the same floor it keeps after its own switches.
+    Only ``lastSwitchAt`` is written: ``lastSwitchTo``/``lastSwitchFrom`` stay
+    the engine's own, so a hand switch away still disarms the no-return bar
+    (see ``_no_return_account``), and nothing goes into switch history (its
+    chart markers mean auto-switches). The cooldown gates only the
+    ``proactive`` and ``consume-first`` triggers; ``at-limit`` and
+    ``failover`` still move off an exhausted or unreadable account.
+
+    Must be called with no other cswap lock held: the engine takes this lock
+    and THEN the switch lock, so the reverse order here would deadlock.
+    """
+    state_path = backup_dir / STATE_FILENAME
+    with FileLock(backup_dir / STATE_LOCK_FILENAME):
+        try:
+            raw = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            raw = {}
+        state = raw if isinstance(raw, dict) else {}
+        state["schemaVersion"] = STATE_SCHEMA_VERSION
+        state["lastSwitchAt"] = time.time() if now is None else now
+        atomic_write_json(state_path, state)
+
+
 class AutoSwitchEngine:
     """Threshold-policy auto-switcher over a :class:`ClaudeAccountSwitcher`.
 
@@ -877,7 +906,7 @@ class AutoSwitchEngine:
     # -- state file ---------------------------------------------------------
 
     def _state_lock(self) -> FileLock:
-        return FileLock(self.state_path.parent / ".autoswitch_state.lock")
+        return FileLock(self.state_path.parent / STATE_LOCK_FILENAME)
 
     def _read_state(self) -> dict:
         try:
@@ -2479,7 +2508,10 @@ class AutoSwitchEngine:
                 self._emit(NoSwitchEvent(reason="cooldown"))
                 return TickOutcome.NO_ACTION
 
-            result = self.switcher.switch_to(number, json_output=True)
+            # manual=False: this block records its own bookkeeping, and the
+            # switcher's manual-switch recording would re-take the state lock
+            # we already hold.
+            result = self.switcher.switch_to(number, json_output=True, manual=False)
             if not result or not result.get("switched"):
                 self._emit(
                     NoSwitchEvent(

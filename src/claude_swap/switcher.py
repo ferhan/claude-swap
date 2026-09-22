@@ -6196,13 +6196,20 @@ class ClaudeAccountSwitcher:
         )
 
     def switch_to(
-        self, identifier: str, json_output: bool = False, force: bool = False
+        self,
+        identifier: str,
+        json_output: bool = False,
+        force: bool = False,
+        manual: bool = True,
     ) -> dict | None:
         """Switch to specific account.
 
         ``force`` activates the target's stored credentials directly, skipping
         both the already-active no-op guard and the backup-current step —
         the recovery path for a live login gone stale (e.g. after --import).
+
+        ``manual`` (see ``_perform_switch``) is False only for the auto-switch
+        engine, which records its own switches.
         """
         if not self.sequence_file.exists():
             raise ConfigError("No accounts are managed yet")
@@ -6301,6 +6308,7 @@ class ClaudeAccountSwitcher:
             emit_output=not json_output,
             force_activate=force,
             provenance=provenance,
+            manual=manual,
         )
         result = self._switch_result_from_op(op, "direct") if json_output else None
         # A forced self-activation really rewrote the live credentials from the
@@ -6682,6 +6690,42 @@ class ClaudeAccountSwitcher:
         )
 
     def _perform_switch(
+        self,
+        target_account: str,
+        emit_output: bool = True,
+        force_activate: bool = False,
+        provenance: dict | None = None,
+        manual: bool = True,
+    ) -> dict:
+        """Perform the switch, then start the engine cooldown if it was manual.
+
+        Every user-facing switch (``switch``, ``switch_to``; so the CLI, menu
+        bar, TUI and widget requests) lands here, so a manual switch starts the
+        same cooldown the auto-switch engine keeps after its own switches and
+        the engine does not undo the user's pick on its next tick. The engine
+        passes ``manual=False``: it writes its own state under the state lock
+        it already holds. Recorded after the switch's locks are released
+        (lock order is state lock, then switch lock). A failed write is logged,
+        never raised: the switch itself already happened.
+        """
+        op = self._perform_switch_locked(
+            target_account,
+            emit_output=emit_output,
+            force_activate=force_activate,
+            provenance=provenance,
+        )
+        if manual and op["from"] != op["to"]:
+            from claude_swap.autoswitch import record_manual_switch
+
+            try:
+                record_manual_switch(self.backup_dir)
+            except Exception as e:
+                self._logger.warning(
+                    f"could not start auto-switch cooldown after manual switch: {e!r}"
+                )
+        return op
+
+    def _perform_switch_locked(
         self,
         target_account: str,
         emit_output: bool = True,
