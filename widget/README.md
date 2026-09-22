@@ -206,8 +206,8 @@ value wins again. Logic: `Shared/AutoswitchToggle.swift`.
 ## Switch to this account
 
 The selected account's detail -- the extra-large right column, the large
-detail page -- carries a "Switch to this account" chip (`Switch` where
-narrow). The active account shows "Active" instead, and an account whose slot
+detail view -- carries a "Switch to this account" chip (`Switch` where
+narrow), beside "‹ Back" on large. The active account shows "Active" instead, and an account whose slot
 holds no stored backup (`switchable: false`) shows "Not switchable": the same
 rule `cswap switch N` applies. A disabled slot stays switchable (disabled only
 leaves automatic rotation), and `kind` is not checked.
@@ -232,7 +232,7 @@ place. Logic: `Shared/AccountSwitch.swift`.
 
 When the snapshot is more than 3 minutes old the header reads "Backend
 stopped" (shortened to an icon where tight) followed by a "Start backend"
-chip (`Start` beside the large pager).
+chip (`Start` where tight).
 
 A widget cannot run a process, and an `AppIntent` in a widget runs in the
 sandboxed extension, which cannot exec `cswap`. So the chip is a `Link` to
@@ -345,15 +345,16 @@ Shared/BackendStart.swift                start URL, start marker, "Starting…",
 Shared/RequestDrop.swift                 atomic dot-temp + rename writes into the drop directory
 Widget/CswapWidgetBundle.swift           @main WidgetBundle
 Widget/CswapWidget.swift                 provider, Appearance override, widget definition
-Widget/Intents.swift                     Appearance config intent, ‹ › page, select, scroll,
-                                         refresh and auto-switch intents, page/nav/toggle stores
+Widget/Intents.swift                     Appearance config intent, ‹ › page, select, details,
+                                         back, scroll, refresh and auto-switch intents,
+                                         page/nav/toggle stores
 Widget/Components.swift                  ring, bar, badges, window row, pager
 Widget/Pages.swift                       small and medium layouts
-Widget/LargePages.swift                  large layout, account card, trend panel
+Widget/LargePages.swift                  large: list/detail routing, the list, the trend panel
 Widget/AutoStatusLine.swift              the auto-switch chip and its state line
 Widget/ActionControls.swift              Switch to this account, Start backend
-Widget/ExtraLargePage.swift              extra-large master-detail: list rows, model usage
-Widget/DetailPages.swift                 per-account detail page
+Widget/ExtraLargePage.swift              extra-large master-detail: rows, facts grid, model usage
+Widget/DetailPages.swift                 per-account detail: small/medium parts, the large view
 Widget/SnapshotFile.swift                the only place the snapshot and request paths are decided
 Widget/CswapWidgetExtension.entitlements sandbox + snapshot read + request-drop write exceptions
 Tests/SnapshotGoldenTests.swift          decodes ../tests/fixtures/snapshot_golden.json
@@ -389,20 +390,33 @@ setting (System/Light/Dark, from Edit Widget), and an auto-switch line with a
 toggle on large and extra-large, and "Switch to this account" in the
 selected account's detail. When the snapshot is more than 3 minutes old the
 header says "Backend stopped · updated 13m ago" instead of the time, with a
-"Start backend" chip (both shortened to fit beside the large pager). Small, medium and large page with ‹ ›, with a detail page per
-account.
+"Start backend" chip (both shortened where tight). Small and medium page with
+‹ ›, with a detail page per account.
 
-Extra-large is master-detail with no pager. The left column lists the
-accounts, three per window; each row is a three-line button that selects it
-(default: the active account): the name -- alias and email both -- on a line
-of its own, then a `5H` and a `7D` line, each with its bar, percent and
-countdown (the 5h one ticking, the weekly one as `3d 11h`). When the list
-overflows, ▲/▼ move it a window at a time -- widgets cannot scroll.
+Large and extra-large are master-detail with no pager, off one `NavState`
+(mode, selection, list offset) per size. The account list is the same on both:
+three rows per window at 344pt, each a three-line button that selects it
+(default: the active account) -- the name, alias and email both, on a line of
+its own, then a `5H` and a `7D` line, each with its bar, percent and countdown
+(the 5h one ticking, the weekly one as `3d 11h`). When the list overflows,
+▲/▼ move it a window at a time -- widgets cannot scroll.
 
-The right column does not repeat any of that. It shows the selected account's
-details, the weekly figures the rows do not carry (pace against expectation,
-when the week runs out, spend), the per-model weekly limits -- the one place
-Opus/Sonnet/Haiku/Fable appear -- and the 5h trend with its line emphasized.
+What differs is where the selection is shown. Extra-large has the room for a
+right column beside the list: the account's details, the weekly figures the
+rows do not carry (pace against expectation, when the week runs out, spend),
+the per-model weekly limits -- the one place Opus/Sonnet/Haiku/Fable appear --
+and the 5h trend with its line emphasized.
+
+Large stacks the same thing behind a drill-down. Selecting stays a row tap;
+the selected row then grows a "Details ›" button, a second tap that swaps
+the list for the detail view -- "‹ Back" and the switch control on one line,
+then the account, the facts grid, the per-model rows and a compact 5h trend
+(46pt of chart, one axis hint each side, no legend). "Details ›" is an
+overlay on the row rather than a button nested in one, which has no defined
+winner, and it sits on the name line, where a name can give up width, rather
+than beside the bars, which cannot. Two things are left out to fit at
+344×344: the pace strip, and the 5h/7d bars -- the list row the tap came from
+carries those.
 
 On every size, a tap that misses every control reloads the widget
 (`RefreshIntent`) rather than launching the stub host app. The catcher sits

@@ -116,13 +116,14 @@ final class DisplayTests: XCTestCase {
         XCTAssertEqual(Paging.label(for: pages[0], snapshot: snapshot), "Overview")
     }
 
-    func testLargeSplitsTheGoldenAccountsAcrossTwoPages() throws {
-        // At the legible type sizes two of the golden's cards fill a 344pt page.
+    func testTheAccountListSizesHaveNoPagerPages() throws {
+        // Large and extra-large navigate with `Navigation`, not the pager.
         let snapshot = try golden()
-        XCTAssertEqual(Paging.overviewChunks(for: .large, snapshot: snapshot).map { $0.map(\.number) },
-                       [[1, 2], [3, 4]])
-        // Extra-large is master-detail and has no pages at all.
+        XCTAssertEqual(Paging.pages(for: .large, snapshot: snapshot), [])
         XCTAssertEqual(Paging.pages(for: .extraLarge, snapshot: snapshot), [])
+        XCTAssertTrue(Navigation.showsAccountList(.large))
+        XCTAssertTrue(Navigation.showsAccountList(.extraLarge))
+        XCTAssertFalse(Navigation.showsAccountList(.medium))
     }
 
     /// The golden document with `count` copies of its first account.
@@ -143,60 +144,57 @@ final class DisplayTests: XCTestCase {
         return try Snapshot.decode(JSONSerialization.data(withJSONObject: doc))
     }
 
-    func testLargeSplitsWhenCardsOverflow() throws {
-        // Eight copies of the heaviest card cannot share a page.
-        let snapshot = try golden(copies: 8)
-        XCTAssertEqual(snapshot.accounts.count, 8)
-        let chunks = Paging.overviewChunks(for: .large, snapshot: snapshot)
-        XCTAssertGreaterThan(chunks.count, 1)
-        XCTAssertEqual(chunks.flatMap { $0 }.count, 8)
-        XCTAssertTrue(chunks.allSatisfy { !$0.isEmpty })
-        XCTAssertEqual(Paging.label(for: .overview(index: 1, count: chunks.count), snapshot: snapshot),
-                       "Overview 2/\(chunks.count)")
-    }
-
     // MARK: - Navigation
 
-    func testSelectDrillsDownThenBackReturnsToTheList() {
-        let selected = Navigation.select(3, in: NavState(), family: .large)
-        XCTAssertEqual(selected, NavState(mode: .detail, selectedAccountNumber: 3, listOffset: 0))
-        let back = Navigation.back(selected)
-        XCTAssertEqual(back.mode, .list)
-        // The list stays where it was.
-        XCTAssertEqual(back.listOffset, selected.listOffset)
-    }
-
-    func testExtraLargeSelectsInPlace() throws {
+    func testSelectSelectsInPlaceOnBothListSizes() throws {
         let snapshot = try golden()
-        let state = Navigation.select(3, in: NavState(listOffset: 0), family: .extraLarge)
-        XCTAssertEqual(state.mode, .list)
-        XCTAssertEqual(state.selectedAccountNumber, 3)
+        let state = Navigation.select(3, in: NavState(listOffset: 0))
+        XCTAssertEqual(state, NavState(mode: .list, selectedAccountNumber: 3, listOffset: 0))
+        // Neither size navigates on a row tap; both survive a resolve as-is.
         XCTAssertEqual(Navigation.resolve(state, snapshot: snapshot, family: .extraLarge), state)
+        XCTAssertEqual(Navigation.resolve(state, snapshot: snapshot, family: .large), state)
     }
 
-    func testExtraLargeDefaultsToTheActiveAccount() throws {
+    func testDetailsOpensTheDetailAndBackReturnsWithTheSelectionKept() throws {
         let snapshot = try golden()
-        let resolved = Navigation.resolve(NavState(), snapshot: snapshot, family: .extraLarge)
-        XCTAssertEqual(resolved.selectedAccountNumber, snapshot.activeAccount?.number)
-        XCTAssertEqual(resolved.mode, .list)
+        let selected = Navigation.select(3, in: NavState(listOffset: 3))
+        let detail = Navigation.openDetail(3, in: selected)
+        XCTAssertEqual(detail, NavState(mode: .detail, selectedAccountNumber: 3, listOffset: 3))
+        // Large keeps the detail; extra-large has no detail mode to keep.
+        XCTAssertEqual(Navigation.resolve(detail, snapshot: snapshot, family: .large).mode, .detail)
+        XCTAssertEqual(Navigation.resolve(detail, snapshot: snapshot, family: .extraLarge).mode, .list)
+        let back = Navigation.back(detail)
+        XCTAssertEqual(back.mode, .list)
+        XCTAssertEqual(back.selectedAccountNumber, 3, "the account stays selected")
+        XCTAssertEqual(back.listOffset, detail.listOffset, "the list stays where it was")
     }
 
-    func testVanishedSelectionFallsBack() throws {
+    func testTheAccountListSizesDefaultToTheActiveAccount() throws {
+        let snapshot = try golden()
+        for family in [LayoutFamily.large, .extraLarge] {
+            let resolved = Navigation.resolve(NavState(), snapshot: snapshot, family: family)
+            XCTAssertEqual(resolved.selectedAccountNumber, snapshot.activeAccount?.number)
+            XCTAssertEqual(resolved.mode, .list)
+        }
+    }
+
+    func testVanishedSelectionFallsBackToTheListAndTheActiveAccount() throws {
         let snapshot = try golden()
         let stale = NavState(mode: .detail, selectedAccountNumber: 42, listOffset: 0)
-        let large = Navigation.resolve(stale, snapshot: snapshot, family: .large)
-        XCTAssertEqual(large.mode, .list)
-        XCTAssertNil(large.selectedAccountNumber)
-        let extraLarge = Navigation.resolve(stale, snapshot: snapshot, family: .extraLarge)
-        XCTAssertEqual(extraLarge.mode, .list)
-        XCTAssertEqual(extraLarge.selectedAccountNumber, 1)
+        for family in [LayoutFamily.large, .extraLarge] {
+            let resolved = Navigation.resolve(stale, snapshot: snapshot, family: family)
+            XCTAssertEqual(resolved.mode, .list, "\(family): the detail had nothing left to show")
+            XCTAssertEqual(resolved.selectedAccountNumber, 1)
+        }
     }
 
-    func testExtraLargeListOverflowsInWindowsOfThree() throws {
-        let snapshot = try golden(copies: 9)
-        let chunks = Navigation.listChunks(for: .extraLarge, snapshot: snapshot)
-        XCTAssertEqual(chunks.map(\.count), [3, 3, 3])
-        XCTAssertEqual(Navigation.listChunks(for: .extraLarge, snapshot: try golden()).map(\.count), [3, 1])
+    func testListOverflowsInWindowsOfThreeOnBothSizes() throws {
+        let nine = try golden(copies: 9)
+        for family in [LayoutFamily.large, .extraLarge] {
+            XCTAssertEqual(Navigation.listChunks(for: family, snapshot: nine).map(\.count), [3, 3, 3])
+            XCTAssertEqual(Navigation.listChunks(for: family, snapshot: try golden()).map(\.count), [3, 1])
+        }
+        XCTAssertEqual(Navigation.rowsPerPage, 3)
     }
 
     func testScrollMovesByAWindowAndClamps() throws {

@@ -69,8 +69,7 @@ enum PageStore {
     }
 }
 
-/// Tapping an account row: extra-large selects it in place; the list-based
-/// sizes drill into its detail.
+/// Tapping an account row selects it in place, on both master-detail sizes.
 struct SelectAccountIntent: AppIntent {
     static let title: LocalizedStringResource = "Show account in ClaudeSwap widget"
     static let isDiscoverable = false
@@ -90,7 +89,56 @@ struct SelectAccountIntent: AppIntent {
 
     func perform() async throws -> some IntentResult {
         guard let layout = LayoutFamily(rawValue: family) else { return .result() }
-        NavStore.set(Navigation.select(number, in: NavStore.state(layout), family: layout), for: layout)
+        NavStore.set(Navigation.select(number, in: NavStore.state(layout)), for: layout)
+        WidgetCenter.shared.reloadTimelines(ofKind: CswapWidget.kind)
+        return .result()
+    }
+}
+
+/// "Details ›" on the selected row: the second tap, which opens the large
+/// detail view. Separate from selecting so a row tap never navigates.
+struct ShowDetailIntent: AppIntent {
+    static let title: LocalizedStringResource = "Show account details in ClaudeSwap widget"
+    static let isDiscoverable = false
+
+    @Parameter(title: "Family")
+    var family: String
+
+    @Parameter(title: "Account")
+    var number: Int
+
+    init() {}
+
+    init(family: LayoutFamily, number: Int) {
+        self.family = family.rawValue
+        self.number = number
+    }
+
+    func perform() async throws -> some IntentResult {
+        guard let layout = LayoutFamily(rawValue: family) else { return .result() }
+        NavStore.set(Navigation.openDetail(number, in: NavStore.state(layout)), for: layout)
+        WidgetCenter.shared.reloadTimelines(ofKind: CswapWidget.kind)
+        return .result()
+    }
+}
+
+/// "‹ Back": the account list again, with the account still selected.
+struct BackToListIntent: AppIntent {
+    static let title: LocalizedStringResource = "Back to the ClaudeSwap widget account list"
+    static let isDiscoverable = false
+
+    @Parameter(title: "Family")
+    var family: String
+
+    init() {}
+
+    init(family: LayoutFamily) {
+        self.family = family.rawValue
+    }
+
+    func perform() async throws -> some IntentResult {
+        guard let layout = LayoutFamily(rawValue: family) else { return .result() }
+        NavStore.set(Navigation.back(NavStore.state(layout)), for: layout)
         WidgetCenter.shared.reloadTimelines(ofKind: CswapWidget.kind)
         return .result()
     }

@@ -84,47 +84,42 @@ struct DetailWindows: View {
     }
 }
 
+/// Large's drill-down: what the extra-large right column shows, stacked for
+/// 344pt. "‹ Back" and the switch control share the top line; the 5h/7d bars
+/// are deliberately not repeated -- the list row the user just came from
+/// carries them -- and neither is the pace strip, which was the first thing
+/// dropped to make the chart fit.
 struct LargeDetail: View {
     let account: Account
     let context: PageContext
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
-                DetailHeader(account: account)
+                BackControl(family: .large)
                 Spacer(minLength: 4)
                 SwitchControl(account: account, context: context)
             }
-            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 3) {
-                row("Email", account.email)
-                row("Alias", account.alias ?? "—")
-                row("Organization", account.organizationName.isEmpty ? "personal" : account.organizationName)
-                row("Kind", account.kind)
-                row("Usage status", account.usageStatus)
-                if let fetched = account.usageFetchedAt {
-                    row("Last updated",
-                        "\(fetched.formatted(date: .abbreviated, time: .shortened)) · "
-                            + Format.age(seconds: context.now.timeIntervalSince(fetched)))
-                }
-            }
-            .font(.system(size: 12))
-            Text("USAGE WINDOWS")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-            DetailWindows(account: account, context: context, limit: .max, titleWidth: 44)
-            if let spend = account.usage?.spend {
-                Text("Spend \(spend.used.formatted(.currency(code: spend.currency))) / "
-                     + spend.limit.formatted(.currency(code: spend.currency)))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
+            DetailHeader(account: account)
+            AccountFactsGrid(account: account, context: context)
+            Divider()
+            ModelUsagePanel(account: account, context: context)
+            Divider()
+            TrendPanel(context: context, emphasized: account.number, compact: true)
         }
     }
+}
 
-    @ViewBuilder private func row(_ key: String, _ value: String) -> some View {
-        GridRow {
-            Text(key).foregroundStyle(.secondary)
-            Text(value).lineLimit(1).truncationMode(.middle)
+/// "‹ Back": the account list again, with the account still selected. No
+/// next/prev -- the list is one tap away and shows where the account sits.
+struct BackControl: View {
+    let family: LayoutFamily
+
+    var body: some View {
+        Button(intent: BackToListIntent(family: family)) {
+            ActionChip(title: "Back", symbol: "chevron.left")
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Back to the account list")
     }
 }

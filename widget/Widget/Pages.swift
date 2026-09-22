@@ -32,12 +32,16 @@ struct CswapWidgetView: View {
     private var family: LayoutFamily { LayoutFamily(widgetFamily) }
 
     @ViewBuilder private func loaded(_ snapshot: Snapshot) -> some View {
-        if family == .extraLarge {
-            ExtraLargePage(
-                context: PageContext(snapshot: snapshot, now: entry.date, family: family, pagerLabel: "",
-                                     pendingToggle: entry.pendingToggle, pendingSwitch: entry.pendingSwitch,
-                                     backendStartedAt: entry.backendStartedAt),
-                nav: Navigation.resolve(entry.nav, snapshot: snapshot, family: family))
+        if Navigation.showsAccountList(family) {
+            let context = PageContext(snapshot: snapshot, now: entry.date, family: family, pagerLabel: "",
+                                      pendingToggle: entry.pendingToggle, pendingSwitch: entry.pendingSwitch,
+                                      backendStartedAt: entry.backendStartedAt)
+            let nav = Navigation.resolve(entry.nav, snapshot: snapshot, family: family)
+            if family == .extraLarge {
+                ExtraLargePage(context: context, nav: nav)
+            } else {
+                LargePage(context: context, nav: nav)
+            }
         } else {
             let pages = Paging.pages(for: family, snapshot: snapshot)
             let page = pages[Paging.normalized(entry.pageIndex, count: pages.count)]
@@ -45,10 +49,10 @@ struct CswapWidgetView: View {
                                       pagerLabel: Paging.label(for: page, snapshot: snapshot),
                                       pendingToggle: entry.pendingToggle, pendingSwitch: entry.pendingSwitch,
                                       backendStartedAt: entry.backendStartedAt)
-            switch family {
-            case .small: SmallPage(context: context, page: page)
-            case .medium: MediumPage(context: context, page: page)
-            case .large, .extraLarge: LargePage(context: context, page: page)
+            if family == .small {
+                SmallPage(context: context, page: page)
+            } else {
+                MediumPage(context: context, page: page)
             }
         }
     }

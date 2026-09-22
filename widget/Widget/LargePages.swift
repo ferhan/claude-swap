@@ -4,34 +4,43 @@ import WidgetKit
 
 // Large, the detail pages, and the extra-large panels.
 
-// MARK: - Large (and the left column of extra-large)
+// MARK: - Large
 
+/// Large mirrors extra-large in a drill-down: the same account list as the
+/// left column there, and the same detail as the right column, stacked -- one
+/// at a time, because 344×344 holds one of them.
 struct LargePage: View {
     let context: PageContext
-    let page: Page
+    /// Already resolved: a selection is set when any account exists.
+    let nav: NavState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 6) {
-                // Stale: first claim on the width. The pager's label
-                // truncates; the stopped cue's shortest form cannot.
-                BrandTitle(context: context).layoutPriority(context.isBackendStale ? 1 : 0)
-                Spacer(minLength: 4)
-                context.pager
-            }
+        let selected = nav.selectedAccountNumber.flatMap { context.snapshot.account(number: $0) }
+        if nav.mode == .detail, let selected {
+            LargeDetail(account: selected, context: context)
+        } else {
+            LargeList(context: context, nav: nav, selected: selected)
+        }
+    }
+}
+
+/// The account list: the extra-large left column fitted to 344pt, with
+/// "Details ›" on the selected row as the way into the detail.
+struct LargeList: View {
+    let context: PageContext
+    let nav: NavState
+    let selected: Account?
+
+    var body: some View {
+        let chunks = Navigation.listChunks(for: .large, snapshot: context.snapshot)
+        let index = Navigation.chunkIndex(offset: nav.listOffset, chunks: chunks)
+        VStack(alignment: .leading, spacing: 6) {
+            BrandTitle(context: context)
             AutoStatusLine(context: context)
-            switch page {
-            case .overview(let index, _):
-                let chunks = Paging.overviewChunks(for: .large, snapshot: context.snapshot)
-                ForEach(chunks.indices.contains(index) ? chunks[index] : [], id: \.number) { account in
-                    AccountCard(account: account, context: context)
-                }
-            case .detail(let number):
-                if let account = context.snapshot.account(number: number) {
-                    LargeDetail(account: account, context: context)
-                }
-            case .hero:
-                EmptyView()
+            ListHeader(family: .large, chunks: chunks, index: index)
+            ForEach(chunks[index], id: \.number) { account in
+                SelectableRow(account: account, context: context,
+                              isSelected: account.number == selected?.number, showsDetails: true)
             }
             Spacer(minLength: 0)
         }
@@ -100,80 +109,16 @@ struct BrandTitle: View {
     }
 }
 
-struct AccountCard: View {
-    let account: Account
-    let context: PageContext
-    @Environment(\.widgetRenderingMode) private var mode
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 6) {
-                InitialsBadge(account: account, size: 22)
-                AccountTitle(account: account, font: .system(size: 12.5, weight: .semibold))
-                    .layoutPriority(1)
-                Text(account.subtitle)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Spacer(minLength: 2)
-                if account.isStale, let age = account.usageAgeSeconds { AgeLabel(seconds: age) }
-                if context.isNext(account) { Tag(text: "Next") }
-                if account.active { ActiveMarker() }
-                if account.isDisabled { Tag(text: "Disabled") }
-            }
-            if account.usage != nil {
-                ForEach(Array(account.windows(maxScoped: Display.maxScopedRows).enumerated()),
-                        id: \.offset) { _, pair in
-                    WindowRow(title: pair.title, window: pair.window, threshold: context.threshold,
-                              now: context.now, ticking: pair.title == "5h", dimmed: account.isStale)
-                    if pair.title == "7d", pair.window.aheadOfPace == true {
-                        PaceNote(window: pair.window)
-                    }
-                }
-            } else {
-                Text(account.statusText)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.primary)
-            }
-        }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 7)
-        .background(RoundedRectangle(cornerRadius: 11).fill(.primary.opacity(0.06)))
-        .overlay {
-            if account.active {
-                RoundedRectangle(cornerRadius: 11)
-                    .stroke(mode == .fullColor ? Color.accentColor : .primary, lineWidth: 1)
-                    .widgetAccentable()
-            }
-        }
-        .opacity(account.isDisabled ? 0.6 : 1)
-    }
-}
-
-struct PaceNote: View {
-    let window: Window
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "arrow.up.right")
-            if let expected = window.expectedPct {
-                Text("Ahead of pace · \(Format.pct(expected)) expected by now")
-            } else {
-                Text("Ahead of pace")
-            }
-        }
-        .font(.system(size: 11, weight: .semibold))
-        .foregroundStyle(.secondary)
-        .padding(.leading, 42)
-    }
-}
-
-// MARK: - Extra-large panels
+// MARK: - Trend panel
 
 struct TrendPanel: View {
     let context: PageContext
     /// The account drawn heavy; the rest are thin and faded.
     let emphasized: Int?
+    /// Large's detail view: a shorter chart, one axis hint instead of three,
+    /// and no legend -- the detail is about one account, which the heavy line
+    /// and the rows above already name.
+    var compact = false
     @Environment(\.widgetRenderingMode) private var mode
 
     private static let palette: [Color] = [.blue, .purple, .teal, .pink, .indigo, .brown, .mint]
@@ -197,13 +142,15 @@ struct TrendPanel: View {
                 HStack {
                     Text(span.axisLabels[0])
                     Spacer()
-                    Text(span.axisLabels[1])
-                    Spacer()
+                    if !compact {
+                        Text(span.axisLabels[1])
+                        Spacer()
+                    }
                     Text(span.axisLabels[2])
                 }
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-                legend
+                if !compact { legend }
             } else {
                 Spacer(minLength: 0)
                 Label("Trend available when the backend is running", systemImage: "chart.xyaxis.line")
@@ -275,7 +222,9 @@ struct TrendPanel: View {
         .chartYAxis(.hidden)
         .chartLegend(.hidden)
         .widgetAccentable()
-        .frame(maxHeight: .infinity)
+        // Compact: the one thing that gives way when the detail runs long, so
+        // the fact rows above it never have to be cut.
+        .frame(minHeight: compact ? 30 : nil, maxHeight: compact ? 46 : .infinity)
     }
 
     /// The emphasized account first, then as many as fit whole in one line;

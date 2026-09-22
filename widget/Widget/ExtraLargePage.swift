@@ -87,14 +87,53 @@ struct ListHeader: View {
 /// Three lines, ~68pt tall. The name -- alias and email both -- gets a line of
 /// its own so neither half is cut; under it one line per window, each with its
 /// bar, percent and countdown.
+///
+/// On large the selected row also carries "Details ›", a second button that
+/// opens the detail view. It is an overlay rather than a nested button --
+/// nesting one `Button(intent:)` inside another's label has no defined
+/// winner -- and it sits on the name line, where a name can give up width,
+/// rather than beside the bars, which cannot.
 struct SelectableRow: View {
     let account: Account
     let context: PageContext
     let isSelected: Bool
+    /// Large: the selected row drills down. Extra-large shows the selection
+    /// in its right column and has nowhere to drill to.
+    var showsDetails = false
     @Environment(\.widgetRenderingMode) private var mode
+
+    private var drillable: Bool { showsDetails && isSelected }
 
     var body: some View {
         let accent: Color = mode == .fullColor ? .accentColor : .primary
+        selectButton(accent: accent)
+            .overlay(alignment: .topTrailing) {
+                if drillable { detailsButton(accent: accent) }
+            }
+    }
+
+    private func detailsButton(accent: Color) -> some View {
+        Button(intent: ShowDetailIntent(family: context.family, number: account.number)) {
+            HStack(spacing: 2) {
+                Text("Details").font(.system(size: 11, weight: .semibold))
+                Image(systemName: "chevron.right").font(.system(size: 10, weight: .bold))
+            }
+            .foregroundStyle(accent)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(accent.opacity(0.2)))
+            .contentShape(Capsule())
+            .widgetAccentable()
+        }
+        .buttonStyle(.plain)
+        .padding(.trailing, 7)
+        .padding(.top, 4)
+        .accessibilityLabel("Details for \(account.label)")
+    }
+
+    private func selectButton(accent: Color) -> some View {
         Button(intent: SelectAccountIntent(family: context.family, number: account.number)) {
             HStack(alignment: .top, spacing: 8) {
                 InitialsBadge(account: account, size: 26)
@@ -158,10 +197,15 @@ struct SelectableRow: View {
             if account.active { ActiveMarker(showsText: false) }
             Spacer(minLength: 4)
             tags(showsAge: showsAge)
-            Image(systemName: "chevron.right")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(isSelected ? accent : .clear)
-                .widgetAccentable()
+            if drillable {
+                // The room the "Details ›" overlay sits in.
+                Color.clear.frame(width: 68, height: 1)
+            } else {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(isSelected ? accent : .clear)
+                    .widgetAccentable()
+            }
         }
     }
 
@@ -198,37 +242,49 @@ struct SelectedDetail: View {
                 Spacer(minLength: 4)
                 SwitchControl(account: account, context: context)
             }
-            Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 2) {
-                // Email, org and status get the full width and wrap: all
-                // three run long, and half a column cut them mid-word.
-                GridRow {
-                    key("Email"); value(account.email).gridCellColumns(3)
-                }
-                GridRow {
-                    key("Org")
-                    value(account.organizationName.isEmpty ? "personal" : account.organizationName)
-                        .gridCellColumns(3)
-                }
-                GridRow {
-                    key("Alias"); value(account.alias ?? "—")
-                    key("Kind"); value(account.kind)
-                }
-                GridRow {
-                    key("Status")
-                    value(account.active ? "active · \(account.statusText)" : account.statusText)
-                    key("Updated")
-                    value(account.usageFetchedAt.map {
-                        Format.age(seconds: context.now.timeIntervalSince($0))
-                    } ?? "—")
-                }
-            }
-            .font(.system(size: 11.5))
+            AccountFactsGrid(account: account, context: context)
             if account.usage == nil {
                 NoUsage(account: account)
             } else {
                 PaceLine(account: account)
             }
         }
+    }
+}
+
+/// Email, org, alias, kind, status and when it was last measured. Shared by
+/// the extra-large right column and the large detail view -- both are 318pt
+/// wide, so the same four rows fit either way.
+struct AccountFactsGrid: View {
+    let account: Account
+    let context: PageContext
+
+    var body: some View {
+        Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 2) {
+            // Email, org and status get the full width and wrap: all
+            // three run long, and half a column cut them mid-word.
+            GridRow {
+                key("Email"); value(account.email).gridCellColumns(3)
+            }
+            GridRow {
+                key("Org")
+                value(account.organizationName.isEmpty ? "personal" : account.organizationName)
+                    .gridCellColumns(3)
+            }
+            GridRow {
+                key("Alias"); value(account.alias ?? "—")
+                key("Kind"); value(account.kind)
+            }
+            GridRow {
+                key("Status")
+                value(account.active ? "active · \(account.statusText)" : account.statusText)
+                key("Updated")
+                value(account.usageFetchedAt.map {
+                    Format.age(seconds: context.now.timeIntervalSince($0))
+                } ?? "—")
+            }
+        }
+        .font(.system(size: 11.5))
     }
 
     private func key(_ text: String) -> some View {

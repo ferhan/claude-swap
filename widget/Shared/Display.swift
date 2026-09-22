@@ -238,8 +238,6 @@ enum Page: Equatable, Sendable {
 enum Paging {
     /// Compact rows beside the medium hero.
     static let mediumRowsPerPage = 3
-    /// Large/extra-large card budget, in bar-row units (see `cardWeight`).
-    static let largeBudget = 13.0
 
     /// Overview first (or one hero per account on small), then one detail
     /// page per account, so ‹ › reaches everything.
@@ -248,10 +246,10 @@ enum Paging {
         switch family {
         case .small:
             return accounts.flatMap { [Page.hero(account: $0.number), .detail(account: $0.number)] }
-        case .extraLarge:
+        case .large, .extraLarge:
             // Master-detail, no pager: see `Navigation`.
             return []
-        case .medium, .large:
+        case .medium:
             let count = overviewChunks(for: family, snapshot: snapshot).count
             return (0..<count).map { Page.overview(index: $0, count: count) }
                 + accounts.map { .detail(account: $0.number) }
@@ -259,44 +257,16 @@ enum Paging {
     }
 
     /// The accounts on each overview page: the non-active ones beside the
-    /// medium hero, every account as a card on large/extra-large.
+    /// medium hero. Large and extra-large are master-detail and split their
+    /// rows with `Navigation.listChunks` instead.
     static func overviewChunks(for family: LayoutFamily, snapshot: Snapshot) -> [[Account]] {
         let accounts = snapshot.orderedAccounts
-        switch family {
-        case .small:
-            return [accounts]
-        case .medium:
-            let others = accounts.filter { !$0.active }
-            guard !others.isEmpty else { return [[]] }
-            return stride(from: 0, to: others.count, by: mediumRowsPerPage).map {
-                Array(others[$0..<min($0 + mediumRowsPerPage, others.count)])
-            }
-        case .large, .extraLarge:
-            var chunks: [[Account]] = []
-            var current: [Account] = []
-            var used = 0.0
-            for account in accounts {
-                let weight = cardWeight(account)
-                if !current.isEmpty && used + weight > largeBudget {
-                    chunks.append(current)
-                    current = []
-                    used = 0
-                }
-                current.append(account)
-                used += weight
-            }
-            if !current.isEmpty || chunks.isEmpty { chunks.append(current) }
-            return chunks
+        guard family == .medium else { return [accounts] }
+        let others = accounts.filter { !$0.active }
+        guard !others.isEmpty else { return [[]] }
+        return stride(from: 0, to: others.count, by: mediumRowsPerPage).map {
+            Array(others[$0..<min($0 + mediumRowsPerPage, others.count)])
         }
-    }
-
-    /// A card's height in bar rows: header plus spacing, then one per window
-    /// (or the status line, when there are none) and one for the
-    /// ahead-of-pace note.
-    static func cardWeight(_ account: Account) -> Double {
-        let rows = max(account.windows(maxScoped: Display.maxScopedRows).count, 1)
-        let paceNote = account.usage?.sevenDay?.aheadOfPace == true ? 1 : 0
-        return 2.2 + Double(rows + paceNote)
     }
 
     static func normalized(_ index: Int, count: Int) -> Int {

@@ -2,8 +2,8 @@ import Foundation
 
 // Pure navigation logic for the list-based sizes, testable without WidgetKit.
 
-/// What a list-based size is showing. Stored per size in the extension's own
-/// defaults (see `NavStore`), so two widgets of one size share it.
+/// What a master-detail size is showing. Stored per size in the extension's
+/// own defaults (see `NavStore`), so two widgets of one size share it.
 struct NavState: Codable, Equatable, Sendable {
     enum Mode: String, Codable, Sendable { case list, detail }
 
@@ -14,22 +14,27 @@ struct NavState: Codable, Equatable, Sendable {
 }
 
 enum Navigation {
-    /// Extra-large list rows per window of the left column. Three lines per
-    /// row (name, 5h, 7d) leave room for three rows.
-    static let extraLargeRowsPerPage = 3
+    /// List rows per window: the extra-large left column and the large list
+    /// are both 344pt wide and draw the same three-line row (name, 5h, 7d),
+    /// which leaves room for three.
+    static let rowsPerPage = 3
+
+    /// The sizes that keep a selection: large drills into a detail view,
+    /// extra-large shows the selection in its right column.
+    static func showsAccountList(_ family: LayoutFamily) -> Bool {
+        family == .large || family == .extraLarge
+    }
 
     /// The list rows, split into the windows ▲/▼ move between. Widgets cannot
     /// scroll, so overflow is paged a window at a time.
     static func listChunks(for family: LayoutFamily, snapshot: Snapshot) -> [[Account]] {
-        switch family {
-        case .extraLarge:
-            let accounts = snapshot.orderedAccounts
-            guard !accounts.isEmpty else { return [[]] }
-            return stride(from: 0, to: accounts.count, by: extraLargeRowsPerPage).map {
-                Array(accounts[$0..<min($0 + extraLargeRowsPerPage, accounts.count)])
-            }
-        case .small, .medium, .large:
+        guard showsAccountList(family) else {
             return Paging.overviewChunks(for: family, snapshot: snapshot)
+        }
+        let accounts = snapshot.orderedAccounts
+        guard !accounts.isEmpty else { return [[]] }
+        return stride(from: 0, to: accounts.count, by: rowsPerPage).map {
+            Array(accounts[$0..<min($0 + rowsPerPage, accounts.count)])
         }
     }
 
@@ -47,14 +52,25 @@ enum Navigation {
         chunks.prefix(index).reduce(0) { $0 + $1.count }
     }
 
-    /// Tapping a row: extra-large selects in place, the others drill down.
-    static func select(_ number: Int, in state: NavState, family: LayoutFamily) -> NavState {
+    /// Tapping a row selects it in place, on both sizes. Opening the detail
+    /// is a second tap, on the selected row's "Details ›" -- large only, since
+    /// extra-large's right column already shows the selection.
+    static func select(_ number: Int, in state: NavState) -> NavState {
         var next = state
         next.selectedAccountNumber = number
-        next.mode = family == .extraLarge ? .list : .detail
+        next.mode = .list
         return next
     }
 
+    /// "Details ›": drill into the row that is already selected.
+    static func openDetail(_ number: Int, in state: NavState) -> NavState {
+        var next = state
+        next.selectedAccountNumber = number
+        next.mode = .detail
+        return next
+    }
+
+    /// "‹ Back": the list again, with the account still selected.
     static func back(_ state: NavState) -> NavState {
         var next = state
         next.mode = .list
@@ -70,22 +86,22 @@ enum Navigation {
         return next
     }
 
-    /// The stored state made valid for this snapshot: a selected account that
-    /// has gone falls back to the list (extra-large: to the active account),
-    /// and an offset past the rows snaps to the last window's start.
+    /// The stored state made valid for this snapshot: an account that has gone
+    /// takes the detail back to the list, the selection falls back to the
+    /// active account, and an offset past the rows snaps to the last window's
+    /// start. Extra-large has no detail mode at all.
     static func resolve(_ state: NavState, snapshot: Snapshot, family: LayoutFamily) -> NavState {
         var next = state
         if let number = next.selectedAccountNumber, snapshot.account(number: number) == nil {
             next.selectedAccountNumber = nil
-        }
-        if family == .extraLarge {
-            next.mode = .list
-            if next.selectedAccountNumber == nil {
-                next.selectedAccountNumber = (snapshot.activeAccount ?? snapshot.orderedAccounts.first)?.number
-            }
-        } else if next.selectedAccountNumber == nil {
             next.mode = .list
         }
+        if family == .extraLarge { next.mode = .list }
+        if next.selectedAccountNumber == nil {
+            next.selectedAccountNumber = (snapshot.activeAccount ?? snapshot.orderedAccounts.first)?.number
+        }
+        // No accounts at all: there is nothing to drill into.
+        if next.selectedAccountNumber == nil { next.mode = .list }
         let chunks = listChunks(for: family, snapshot: snapshot)
         next.listOffset = chunkStart(chunkIndex(offset: max(next.listOffset, 0), chunks: chunks), chunks: chunks)
         return next
