@@ -6720,9 +6720,14 @@ class ClaudeAccountSwitcher:
             try:
                 record_manual_switch(self.backup_dir)
             except Exception as e:
-                self._logger.warning(
-                    f"could not start auto-switch cooldown after manual switch: {e!r}"
+                # Loud, not just logged: the switch happened, so the engine
+                # may undo it on its next tick and nothing else would say why.
+                message = (
+                    "Warning: could not start the auto-switch cooldown for this "
+                    f"switch ({e}); auto-switch may move off it on its next tick."
                 )
+                self._logger.warning(message)
+                warning(message, file=sys.stderr)
         return op
 
     def _perform_switch_locked(

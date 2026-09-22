@@ -7587,6 +7587,42 @@ class TestManualSwitchesStartTheCooldown:
         ) is True
         assert harness.state()["lastSwitchAt"] == pytest.approx(now, abs=10)
 
+    def test_the_wait_is_longer_than_the_lock_default(self, harness):
+        # The engine takes the state lock and then performs a whole switch
+        # under it (freshen, keychain, file work), which outlasts FileLock's
+        # 10s default — and the thing dropped would be the user's cooldown.
+        from claude_swap import autoswitch
+
+        seen = []
+        real = autoswitch.FileLock
+
+        def spy(path, timeout=10.0):
+            seen.append(timeout)
+            return real(path, timeout=timeout)
+
+        with patch("claude_swap.autoswitch.FileLock", spy):
+            autoswitch.record_manual_switch(harness.switcher.backup_dir)
+
+        assert seen == [autoswitch.MANUAL_SWITCH_LOCK_TIMEOUT_S]
+        assert autoswitch.MANUAL_SWITCH_LOCK_TIMEOUT_S > 10.0
+
+    def test_a_cooldown_that_cannot_be_recorded_is_announced(self, harness, capsys):
+        # The switch itself happened, so the engine may move off it on the
+        # next tick; a line in a log file nobody tails is not enough.
+        from claude_swap.exceptions import LockError
+
+        harness.clock.now = time.time()
+        with patch(
+            "claude_swap.autoswitch.record_manual_switch",
+            side_effect=LockError("state lock busy"),
+        ):
+            harness.switcher.switch_to("2", json_output=True)
+
+        assert harness.active_number() == 2, "the switch still happened"
+        err = capsys.readouterr().err
+        assert "could not start the auto-switch cooldown" in err
+        assert "state lock busy" in err
+
     def test_the_cli_switch_path_gets_it(self, harness):
         from claude_swap import cli
 

@@ -767,7 +767,19 @@ def _headroom_by_account(
     }
 
 
-def record_manual_switch(backup_dir: Path, now: float | None = None) -> None:
+# How long a manual switch waits for the state lock. FileLock's 10s default
+# was too short for the one holder that matters: the engine takes this lock and
+# then performs a whole switch under it (token freshen, keychain, file work),
+# which on a slow keychain outlasts 10s — and the cooldown that the user's own
+# switch is supposed to start would be the thing dropped.
+MANUAL_SWITCH_LOCK_TIMEOUT_S = 60.0
+
+
+def record_manual_switch(
+    backup_dir: Path,
+    now: float | None = None,
+    timeout: float = MANUAL_SWITCH_LOCK_TIMEOUT_S,
+) -> None:
     """Start the engine's cooldown for a switch the user made by hand.
 
     Called by the switcher after every successful manual switch (CLI, menu
@@ -781,10 +793,13 @@ def record_manual_switch(backup_dir: Path, now: float | None = None) -> None:
     ``failover`` still move off an exhausted or unreadable account.
 
     Must be called with no other cswap lock held: the engine takes this lock
-    and THEN the switch lock, so the reverse order here would deadlock.
+    and THEN the switch lock, so the reverse order here would deadlock — which
+    is also why the wait is generous rather than instant (see
+    ``MANUAL_SWITCH_LOCK_TIMEOUT_S``) and why giving up raises: the caller
+    switched, and a cooldown that did not start is worth saying out loud.
     """
     state_path = backup_dir / STATE_FILENAME
-    with FileLock(backup_dir / STATE_LOCK_FILENAME):
+    with FileLock(backup_dir / STATE_LOCK_FILENAME, timeout=timeout):
         try:
             raw = json.loads(state_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
