@@ -15,7 +15,7 @@ struct ExtraLargePage: View {
         let index = Navigation.chunkIndex(offset: nav.listOffset, chunks: chunks)
         let selected = nav.selectedAccountNumber.flatMap { context.snapshot.account(number: $0) }
         HStack(alignment: .top, spacing: 14) {
-            VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: 6) {
                 BrandTitle(context: context)
                 AutoStatusLine(context: context)
                 ListHeader(family: .extraLarge, chunks: chunks, index: index)
@@ -27,11 +27,11 @@ struct ExtraLargePage: View {
             }
             .frame(width: 344)
             Divider()
-            VStack(alignment: .leading, spacing: 9) {
+            VStack(alignment: .leading, spacing: 8) {
                 if let selected {
-                    PacePanel(context: context, account: selected)
-                    Divider()
                     SelectedDetail(account: selected, context: context)
+                    Divider()
+                    ModelUsagePanel(account: selected, context: context)
                     Divider()
                 }
                 TrendPanel(context: context, emphasized: selected?.number)
@@ -92,8 +92,9 @@ struct ListHeader: View {
 /// One account in the list: a button that selects it. The selection is a
 /// fill, an outline and a chevron, so it does not rely on color.
 ///
-/// Two lines, ~52pt tall: name, subtitle and tags on the left; each window's
-/// percent over its countdown on the right.
+/// Three lines, ~68pt tall. The name -- alias and email both -- gets a line of
+/// its own so neither half is cut; under it one line per window, each with its
+/// bar, percent and countdown.
 struct SelectableRow: View {
     let account: Account
     let context: PageContext
@@ -103,32 +104,31 @@ struct SelectableRow: View {
     var body: some View {
         let accent: Color = mode == .fullColor ? .accentColor : .primary
         Button(intent: SelectAccountIntent(family: context.family, number: account.number)) {
-            HStack(spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
                 InitialsBadge(account: account, size: 26)
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 6) {
-                            AccountTitle(account: account, font: .system(size: 12.5, weight: .semibold))
-                                .foregroundStyle(.primary)
-                            if account.active { ActiveMarker(showsText: false) }
+                VStack(alignment: .leading, spacing: 4) {
+                    nameLine(accent: accent)
+                    if account.usage == nil {
+                        Text(account.statusText)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    } else {
+                        if let fiveHour = account.usage?.fiveHour {
+                            window("5H", fiveHour, ticking: true)
                         }
-                        meta
-                    }
-                    Spacer(minLength: 4)
-                    if let fiveHour = account.usage?.fiveHour {
-                        column("5h", fiveHour, ticking: true)
-                    }
-                    if let (title, window) = account.weeklyWindow {
-                        column(title == "Weekly" ? "7d" : title, window, ticking: false)
+                        // Always "7D", even when the plan's only weekly limits
+                        // are per-model: which model it is belongs to the
+                        // detail column, and a name here would cut the bar.
+                        if let weekly = account.weeklyWindow?.window {
+                            window("7D", weekly, ticking: false)
+                        }
                     }
                 }
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(isSelected ? accent : .clear)
-                    .widgetAccentable()
             }
             .padding(.horizontal, 9)
-            .padding(.vertical, 8)
+            .padding(.vertical, 7)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 10)
                 .fill(isSelected ? accent.opacity(0.16) : Color.primary.opacity(0.06)))
@@ -141,25 +141,26 @@ struct SelectableRow: View {
         }
         .buttonStyle(.plain)
         .opacity(account.isDisabled ? 0.6 : 1)
-        .accessibilityLabel("\(account.label)\(isSelected ? ", selected" : "")")
+        .accessibilityLabel("\(account.fullName)\(isSelected ? ", selected" : "")")
     }
 
-    /// Subtitle (or status, when there is no usage) and the tags. The
-    /// subtitle is cut, then dropped, rather than shrunk to a letter.
-    private var meta: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 5) { subtitle.fixedSize(); tags }
-            HStack(spacing: 5) { subtitle.frame(minWidth: 48, alignment: .leading); tags }
-            HStack(spacing: 5) { tags }
+    /// `work — dev@example.com`, then the markers and the selection chevron.
+    /// The name is cut from the tail only once the tags have had their say.
+    private func nameLine(accent: Color) -> some View {
+        HStack(spacing: 6) {
+            Text(account.fullName)
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            if account.active { ActiveMarker(showsText: false) }
+            Spacer(minLength: 4)
+            tags
+            Image(systemName: "chevron.right")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(isSelected ? accent : .clear)
+                .widgetAccentable()
         }
-    }
-
-    private var subtitle: some View {
-        Text(account.usage == nil ? account.statusText : account.subtitle)
-            .font(.system(size: 11.5))
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .truncationMode(.tail)
     }
 
     @ViewBuilder private var tags: some View {
@@ -168,79 +169,57 @@ struct SelectableRow: View {
         if account.isDisabled { Tag(text: "Off") }
     }
 
-    /// `5h 62%` over its timer (ticking for 5h, `3d 11h` for weekly). The
-    /// minimum width keeps the columns aligned from row to row; a wide cell
-    /// (`Opus ⚠ 100%`) widens its own row rather than being cut.
-    private func column(_ title: String, _ window: Window, ticking: Bool) -> some View {
-        VStack(alignment: .trailing, spacing: 4) {
-            HStack(spacing: 3) {
-                Text(title)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                PctText(pct: window.pct, threshold: context.threshold,
-                        font: .system(size: 14, weight: .semibold))
-            }
-            Countdown(resetsAt: window.resetsAt, now: context.now, ticking: ticking)
-                .font(.system(size: 13, weight: .semibold).monospacedDigit())
-                .foregroundStyle(.primary)
-                // A ticking timer otherwise claims all it is offered.
-                .frame(width: 66, alignment: .trailing)
-        }
-        .lineLimit(1)
-        .fixedSize()
-        .frame(minWidth: 70, alignment: .trailing)
+    /// `5H ▰▰▰▱ 62% 40:28:47`: the ramp bar with its threshold tick, the
+    /// percent with its severity glyph, and the countdown (ticking for 5h).
+    private func window(_ title: String, _ window: Window, ticking: Bool) -> some View {
+        WindowRow(title: title, window: window, threshold: context.threshold,
+                  now: context.now, ticking: ticking, dimmed: account.isStale,
+                  titleWidth: 26, compact: true)
     }
 }
 
-/// The selected account's facts and windows, condensed into two columns.
+/// The selected account's facts, and what the list rows do not already say:
+/// how the week is pacing, and the spend. The 5h/7d bars, percentages and
+/// countdowns live in the list rows now and are deliberately not repeated.
 struct SelectedDetail: View {
     let account: Account
     let context: PageContext
 
     var body: some View {
-        let windows = account.windows(maxScoped: Display.maxScopedRows)
         VStack(alignment: .leading, spacing: 6) {
+            Text("SELECTED ACCOUNT")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
             Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 2) {
+                // Email and status get the full width: both run long, and
+                // both are cheap to misread when cut.
                 GridRow {
-                    key("Email"); value(account.email)
-                    key("Org"); value(account.organizationName.isEmpty ? "personal" : account.organizationName)
+                    key("Email"); value(account.email).gridCellColumns(3)
                 }
                 GridRow {
                     key("Alias"); value(account.alias ?? "—")
-                    key("Kind"); value(account.kind)
+                    key("Org"); value(account.organizationName.isEmpty ? "personal" : account.organizationName)
                 }
                 GridRow {
-                    key("Status"); value(account.active ? "active · \(account.statusText)" : account.statusText)
+                    key("Kind"); value(account.kind)
                     key("Updated")
                     value(account.usageFetchedAt.map {
                         Format.age(seconds: context.now.timeIntervalSince($0))
                     } ?? "—")
                 }
-            }
-            .font(.system(size: 11.5))
-            if windows.isEmpty {
-                NoUsage(account: account)
-            } else {
-                // One column while there is room for real bars; two once
-                // per-model windows would push the chart out.
-                let columns = windows.count > 2 ? 2 : 1
-                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
-                    ForEach(Array(stride(from: 0, to: windows.count, by: columns)), id: \.self) { start in
-                        GridRow {
-                            ForEach(windows[start..<min(start + columns, windows.count)].indices, id: \.self) { index in
-                                row(windows[index])
-                            }
-                        }
-                    }
+                GridRow {
+                    key("Status")
+                    value(account.active ? "active · \(account.statusText)" : account.statusText)
+                        .gridCellColumns(3)
                 }
             }
+            .font(.system(size: 11.5))
+            if account.usage == nil {
+                NoUsage(account: account)
+            } else {
+                PaceLine(account: account)
+            }
         }
-    }
-
-    private func row(_ pair: (title: String, window: Window)) -> some View {
-        WindowRow(title: pair.title, window: pair.window, threshold: context.threshold,
-                  now: context.now, ticking: pair.title == "5h", dimmed: account.isStale,
-                  titleWidth: 30, compact: true)
     }
 
     private func key(_ text: String) -> some View {
@@ -253,58 +232,28 @@ struct SelectedDetail: View {
     }
 }
 
-struct PacePanel: View {
-    let context: PageContext
+/// The weekly figures the list rows do not carry: pace against expectation,
+/// when the week runs out, and the spend. Everything time-to-reset was
+/// dropped -- the 7D row already ticks it down.
+struct PaceLine: View {
     let account: Account
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 4) {
-                Text("Weekly pace").font(.system(size: 12.5, weight: .bold))
-                Text("· \(account.label)")
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 6)
-                if let spend = account.usage?.spend {
-                    Text("Spend \(spend.used.formatted(.currency(code: spend.currency))) / "
-                         + spend.limit.formatted(.currency(code: spend.currency)))
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .fixedSize()
+        let window = account.usage?.sevenDay
+        HStack(alignment: .top, spacing: 14) {
+            if let window {
+                stat(paceTitle(window), window.expectedPct.map { "\(Format.pct($0)) expected" } ?? "no pace data")
+                if window.willLastToReset == false, let runsOut = window.projectedExhaustionAt {
+                    stat(runsOut.formatted(.dateTime.weekday(.abbreviated).hour().minute()), "runs out")
+                } else if window.willLastToReset == true {
+                    stat("Lasts", "to reset")
                 }
             }
-            if let window = account.usage?.sevenDay {
-                // The reset date goes first when the column is narrow; the
-                // 7d row below still shows its countdown.
-                ViewThatFits(in: .horizontal) {
-                    stats(window, showsReset: true)
-                    stats(window, showsReset: false)
-                }
-                UsageBar(pct: window.pct, threshold: context.threshold)
-            } else {
-                Text("No weekly window for this account.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+            if let spend = account.usage?.spend {
+                stat(spend.used.formatted(.currency(code: spend.currency)),
+                     "of \(spend.limit.formatted(.currency(code: spend.currency))) spent")
             }
-        }
-    }
-
-    private func stats(_ window: Window, showsReset: Bool) -> some View {
-        HStack(alignment: .top, spacing: 16) {
-            stat(paceTitle(window), window.expectedPct.map { "\(Format.pct($0)) expected" } ?? "no data yet")
-            stat(Format.pct(window.pct), "used")
-            if window.willLastToReset == false, let runsOut = window.projectedExhaustionAt {
-                stat(runsOut.formatted(.dateTime.weekday(.abbreviated).hour().minute()), "runs out")
-            } else if window.willLastToReset == true {
-                stat("Lasts", "to reset")
-            }
-            if showsReset, let resetsAt = window.resetsAt {
-                stat(resetsAt.formatted(.dateTime.month(.abbreviated).day()),
-                     "resets · \(Format.countdown(to: resetsAt, now: context.now))")
-            }
+            Spacer(minLength: 0)
         }
     }
 
@@ -318,8 +267,49 @@ struct PacePanel: View {
 
     private func stat(_ value: String, _ caption: String) -> some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(value).font(.system(size: 14, weight: .semibold).monospacedDigit()).lineLimit(1).fixedSize()
+            Text(value).font(.system(size: 13, weight: .semibold).monospacedDigit()).lineLimit(1).fixedSize()
             Text(caption).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).fixedSize()
+        }
+    }
+}
+
+/// The per-model weekly limits -- Opus, Sonnet, Haiku, Fable. The only place
+/// in the widget these appear, so the list rows stay to 5h and 7d.
+struct ModelUsagePanel: View {
+    let account: Account
+    let context: PageContext
+
+    var body: some View {
+        let rows = account.scopedWindows
+        VStack(alignment: .leading, spacing: 5) {
+            Text("BY MODEL · WEEKLY")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            if rows.isEmpty {
+                Text(account.usage == nil ? "No usage to break down."
+                                          : "This plan has no per-model limits.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, pair in
+                    row(pair)
+                }
+            }
+        }
+    }
+
+    private func row(_ pair: (title: String, window: Window)) -> some View {
+        HStack(spacing: 8) {
+            Text(pair.title)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(width: 52, alignment: .leading)
+            UsageBar(pct: pair.window.pct, threshold: context.threshold, dimmed: account.isStale)
+            PctText(pct: pair.window.pct, threshold: context.threshold,
+                    font: .system(size: 13, weight: .semibold))
+                .frame(width: 50, alignment: .trailing)
         }
     }
 }

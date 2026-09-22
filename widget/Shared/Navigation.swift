@@ -14,8 +14,9 @@ struct NavState: Codable, Equatable, Sendable {
 }
 
 enum Navigation {
-    /// Extra-large list rows per window of the left column.
-    static let extraLargeRowsPerPage = 4
+    /// Extra-large list rows per window of the left column. Three lines per
+    /// row (name, 5h, 7d) leave room for three rows.
+    static let extraLargeRowsPerPage = 3
 
     /// The list rows, split into the windows ▲/▼ move between. Widgets cannot
     /// scroll, so overflow is paged a window at a time.

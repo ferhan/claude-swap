@@ -166,8 +166,13 @@ same decisions written twice. They move together or the extension gets `EPERM`.
 
 ## Auto-switch toggle
 
-Large and extra-large put a native, regular-size `Toggle(isOn:intent:)`
-labeled "Auto-switch" with a symbol on the auto-switch line, bound to the snapshot's `autoswitch.enabled`. Tapping it runs
+Large and extra-large put a `Toggle(isOn:intent:)` labeled "Auto-switch" on the
+auto-switch line, bound to the snapshot's `autoswitch.enabled`. It is drawn by
+a custom `ToggleStyle` -- a capsule holding the label, a filled state dot
+(green on, red off) and the state in words (`at 85%` / `Off`). Not
+`.toggleStyle(.switch)`: AppKit's switch is not one of the controls a widget's
+out-of-process renderer can draw, and came out as the yellow "unsupported
+view" placeholder. Tapping it runs
 `SetAutoswitchIntent` in the extension, which writes
 `~/.claude-swap-backup/widget-requests/autoswitch-<epochMillis>.json`
 (as `.autoswitch-<epochMillis>.tmp`, then renamed; mode 0600):
@@ -249,7 +254,8 @@ App/HostMain.swift                       entry point; `--placed-widgets` CLI mod
 App/CswapWidgetHostApp.swift             stub host window
 App/CswapWidgetHost.entitlements         sandbox, no exceptions
 Shared/Snapshot.swift                    schema-v1 decoding (shared with the tests)
-Shared/Display.swift                     pure display logic: ramp, severity, paging, trend
+Shared/Display.swift                     pure display logic: ramp, severity, formatting, paging
+Shared/Trend.swift                       24h trend: samples in range, time axis, switch markers
 Shared/Navigation.swift                  list navigation state: select, back, scroll, resolve
 Shared/AutoswitchToggle.swift            toggle request file + pending-state resolution
 Widget/CswapWidgetBundle.swift           @main WidgetBundle
@@ -258,8 +264,9 @@ Widget/Intents.swift                     Appearance config intent, ‹ › page,
                                          refresh and auto-switch intents, page/nav/toggle stores
 Widget/Components.swift                  ring, bar, badges, window row, pager
 Widget/Pages.swift                       small and medium layouts
-Widget/LargePages.swift                  large layout, pace + trend panels
-Widget/ExtraLargePage.swift              extra-large master-detail
+Widget/LargePages.swift                  large layout, account card, trend panel
+Widget/AutoStatusLine.swift              the auto-switch chip and its state line
+Widget/ExtraLargePage.swift              extra-large master-detail: list rows, model usage
 Widget/DetailPages.swift                 per-account detail page
 Widget/SnapshotFile.swift                the only place the snapshot and request paths are decided
 Widget/CswapWidgetExtension.entitlements sandbox + snapshot read + request-drop write exceptions
@@ -297,13 +304,18 @@ the header says "Backend not running · updated 13m ago" instead of the time
 account.
 
 Extra-large is master-detail with no pager. The left column lists the
-accounts, four per window; each row is a two-line button that selects it
-(default: the active account): name and subtitle on the left, and each
-window's percent over its reset on the right (the 5h one ticking, the weekly
-one as `3d 11h`). When the list overflows, ▲/▼ move it a
-window at a time -- widgets cannot scroll. The right column shows the selected account's weekly pace, its details
-and windows, and the 5h trend with its line emphasized. A tap that misses every
-control reloads the widget rather than opening the stub host app.
+accounts, three per window; each row is a three-line button that selects it
+(default: the active account): the name -- alias and email both -- on a line
+of its own, then a `5H` and a `7D` line, each with its bar, percent and
+countdown (the 5h one ticking, the weekly one as `3d 11h`). When the list
+overflows, ▲/▼ move it a window at a time -- widgets cannot scroll.
+
+The right column does not repeat any of that. It shows the selected account's
+details, the weekly figures the rows do not carry (pace against expectation,
+when the week runs out, spend), the per-model weekly limits -- the one place
+Opus/Sonnet/Haiku/Fable appear -- and the 5h trend with its line emphasized. A
+tap that misses every control reloads the widget rather than opening the stub
+host app.
 
 The trend's time axis spans the history actually held: from the oldest sample
 or auto-switch (at most 24h back) to now, never narrower than an hour, with

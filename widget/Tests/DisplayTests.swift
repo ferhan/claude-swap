@@ -78,6 +78,23 @@ final class DisplayTests: XCTestCase {
         XCTAssertEqual(snapshot.accounts[2].peakPct, 100)
     }
 
+    /// The extra-large list gives the name a line of its own, so it carries
+    /// both halves; an account with no alias is just its email.
+    func testFullNameJoinsAliasAndEmail() throws {
+        let snapshot = try golden()
+        XCTAssertEqual(snapshot.accounts[0].fullName, "work — dev@example.com")
+        XCTAssertEqual(snapshot.accounts[1].fullName, snapshot.accounts[1].email)
+    }
+
+    /// Per-model windows, and only those: the detail column is the one place
+    /// they appear.
+    func testScopedWindowsAreTheModelRowsOnly() throws {
+        let snapshot = try golden()
+        XCTAssertEqual(snapshot.accounts[2].scopedWindows.map(\.title), ["Opus", "Sonnet"])
+        XCTAssertTrue(snapshot.accounts[0].scopedWindows.isEmpty)
+        XCTAssertTrue(snapshot.accounts[3].scopedWindows.isEmpty)
+    }
+
     // MARK: - Paging
 
     func testSmallPagesAlternateHeroAndDetail() throws {
@@ -175,22 +192,22 @@ final class DisplayTests: XCTestCase {
         XCTAssertEqual(extraLarge.selectedAccountNumber, 1)
     }
 
-    func testExtraLargeListOverflowsInWindowsOfFour() throws {
+    func testExtraLargeListOverflowsInWindowsOfThree() throws {
         let snapshot = try golden(copies: 9)
         let chunks = Navigation.listChunks(for: .extraLarge, snapshot: snapshot)
-        XCTAssertEqual(chunks.map(\.count), [4, 4, 1])
-        XCTAssertEqual(Navigation.listChunks(for: .extraLarge, snapshot: try golden()).count, 1)
+        XCTAssertEqual(chunks.map(\.count), [3, 3, 3])
+        XCTAssertEqual(Navigation.listChunks(for: .extraLarge, snapshot: try golden()).map(\.count), [3, 1])
     }
 
     func testScrollMovesByAWindowAndClamps() throws {
         let chunks = Navigation.listChunks(for: .extraLarge, snapshot: try golden(copies: 14))
-        XCTAssertEqual(chunks.map(\.count), [4, 4, 4, 2])
+        XCTAssertEqual(chunks.map(\.count), [3, 3, 3, 3, 2])
         var state = NavState()
         state = Navigation.scroll(state, by: 1, chunks: chunks)
-        XCTAssertEqual(state.listOffset, 4)
+        XCTAssertEqual(state.listOffset, 3)
         state = Navigation.scroll(state, by: 2, chunks: chunks)
-        XCTAssertEqual(state.listOffset, 12)
-        state = Navigation.scroll(state, by: 1, chunks: chunks)
+        XCTAssertEqual(state.listOffset, 9)
+        state = Navigation.scroll(state, by: 3, chunks: chunks)
         XCTAssertEqual(state.listOffset, 12, "clamps at the last window")
         state = Navigation.scroll(state, by: -5, chunks: chunks)
         XCTAssertEqual(state.listOffset, 0, "clamps at the first window")
@@ -202,10 +219,10 @@ final class DisplayTests: XCTestCase {
         // Rows shrank from 14 to 9 while the list was on its third window.
         let snapshot = try golden(copies: 9)
         let resolved = Navigation.resolve(NavState(listOffset: 12), snapshot: snapshot, family: .extraLarge)
-        XCTAssertEqual(resolved.listOffset, 8)
+        XCTAssertEqual(resolved.listOffset, 6)
         // Mid-window offsets snap to their window's start.
-        XCTAssertEqual(Navigation.resolve(NavState(listOffset: 3), snapshot: snapshot,
-                                          family: .extraLarge).listOffset, 0)
+        XCTAssertEqual(Navigation.resolve(NavState(listOffset: 4), snapshot: snapshot,
+                                          family: .extraLarge).listOffset, 3)
         XCTAssertEqual(Navigation.resolve(NavState(listOffset: -3), snapshot: snapshot,
                                           family: .extraLarge).listOffset, 0)
     }
