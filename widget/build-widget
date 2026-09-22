@@ -20,13 +20,26 @@ cd "$WIDGET"
 
 APPEX_ID="com.cswap.widget.extension"
 APPEX_REL="Contents/PlugIns/CswapWidgetExtension.appex"
-DEST="$HOME/Applications/CswapWidgetHost.app"
+DEST="$HOME/Applications/cswap.app"
+# Pre-rename product name. Only ever our own build output, so an install or
+# uninstall found one lying around removes it -- see legacy_cleanup.
+LEGACY_DEST="$HOME/Applications/CswapWidgetHost.app"
 BUILD="$WIDGET/build"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
 
 die() { echo "$*" >&2; exit 1; }
 
 registered() { pluginkit -m -i "$APPEX_ID" 2>/dev/null | grep -q .; }
+
+# Deregister and delete a pre-rename install, if one is still sitting in
+# ~/Applications. It is our own build output, never something the user put
+# there, so removing it outright is safe.
+legacy_cleanup() {
+    [[ -d "$LEGACY_DEST" ]] || return 0
+    pluginkit -r "$LEGACY_DEST/$APPEX_REL" 2>/dev/null || true
+    "$LSREGISTER" -u "$LEGACY_DEST" || true
+    rm -rf "$LEGACY_DEST"
+}
 
 # $1 is the certificate kind the chosen command needs.
 preflight() {
@@ -65,21 +78,23 @@ install_widget() {
     xcodebuild -project CswapWidget.xcodeproj -scheme CswapWidgetHost \
         -configuration Debug -derivedDataPath "$BUILD/dd" \
         CURRENT_PROJECT_VERSION="$BUILD_NUMBER" build
-    BUILT="$BUILD/dd/Build/Products/Debug/CswapWidgetHost.app"
+    BUILT="$BUILD/dd/Build/Products/Debug/cswap.app"
 
     # xcodebuild registers whatever it just built. Two registered copies of one
     # extension bundle id and pkd keeps only the last it saw, so drop the build
     # directory's copy before registering the installed one. Also drop any
     # stale copy left behind under a *different* DerivedData root (e.g. from
     # Xcode.app, or an old CswapWidget-* hash) -- same failure mode, just not
-    # this run's own build directory.
+    # this run's own build directory. Covers both the current product name and
+    # the pre-rename one, in case a DerivedData directory predates the rename.
     "$LSREGISTER" -u "$BUILT"
-    for stale in "$HOME"/Library/Developer/Xcode/DerivedData/CswapWidget-*/Build/Products/*/CswapWidgetHost.app; do
+    for stale in "$HOME"/Library/Developer/Xcode/DerivedData/CswapWidget-*/Build/Products/*/{cswap,CswapWidgetHost}.app; do
         [[ -d "$stale" ]] || continue
         # Best-effort: -u fails if it was never registered (or already was
         # unregistered), which isn't a problem worth stopping the install for.
         "$LSREGISTER" -u "$stale" || true
     done
+    legacy_cleanup
     rm -rf "$DEST"
     mkdir -p "$(dirname "$DEST")"
     ditto "$BUILT" "$DEST"
@@ -114,6 +129,7 @@ uninstall_widget() {
         rm -rf "$DEST"
         sleep 2
     fi
+    legacy_cleanup
     ! registered || die \
 "Removed $DEST but the extension is still registered. Something else is
 holding it -- find it with: pluginkit -m -v -i $APPEX_ID"
@@ -149,7 +165,7 @@ PLIST
     # A plain `xcodebuild build` injects com.apple.security.get-task-allow,
     # which notarization rejects outright. Prove the exported extension is
     # clean before spending a submission on it.
-    APP="$BUILD/export/CswapWidgetHost.app"
+    APP="$BUILD/export/cswap.app"
     if codesign -d --entitlements - --xml "$APP/$APPEX_REL" 2>/dev/null \
         | plutil -p - | grep -q get-task-allow; then
         die \

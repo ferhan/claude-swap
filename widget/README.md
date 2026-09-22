@@ -59,7 +59,7 @@ after editing `project.yml`.
 
 `install` runs the preflight checks below, regenerates the project, builds
 Debug into `build/` (gitignored), copies the host app to
-`~/Applications/CswapWidgetHost.app` and registers it with `lsregister`. Then
+`~/Applications/cswap.app` and registers it with `lsregister`. Then
 add the widget from the gallery: right-click the desktop, Edit Widgets, and
 look for **cswap**. Nothing is launched — an extension is registered by being
 on disk in a known app, not by running one.
@@ -170,7 +170,7 @@ on it, and stops if it is not:
 
 ```bash
 codesign -d --entitlements - --xml \
-  build/export/CswapWidgetHost.app/Contents/PlugIns/CswapWidgetExtension.appex \
+  build/export/cswap.app/Contents/PlugIns/CswapWidgetExtension.appex \
   | plutil -p -
 ```
 

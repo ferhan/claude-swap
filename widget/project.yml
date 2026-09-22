@@ -50,6 +50,12 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.cswap.widget
+        # The widget gallery's sidebar uses LaunchServices' display name,
+        # which for an unlocalized bundle falls back to the .app filename --
+        # not CFBundleName/CFBundleDisplayName below. So the product itself
+        # has to be named cswap.app; the bundle id stays com.cswap.widget so
+        # registration identity does not change.
+        PRODUCT_NAME: cswap
         CODE_SIGN_ENTITLEMENTS: App/CswapWidgetHost.entitlements
         INFOPLIST_KEY_NSHumanReadableCopyright: ""
     info:
@@ -57,7 +63,7 @@ targets:
       properties:
         # The widget gallery groups widgets under the host app's name, and
         # LaunchServices shows CFBundleName for an unlocalized bundle, so both
-        # say "cswap". PRODUCT_NAME (and so the .app file name) is unchanged.
+        # say "cswap".
         CFBundleDisplayName: cswap
         CFBundleName: cswap
         LSApplicationCategoryType: public.app-category.developer-tools

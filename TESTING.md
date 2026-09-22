@@ -208,7 +208,7 @@ it polls, measures, publishes the snapshot and reports what it *would* do.
 
 ## 6. The widget
 
-Already installed at `~/Applications/CswapWidgetHost.app` and registered:
+Already installed at `~/Applications/cswap.app` and registered:
 
 ```bash
 pluginkit -m -v | grep -i cswap
