@@ -18,7 +18,11 @@ set -euo pipefail
 WIDGET="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$WIDGET"
 
-APPEX_ID="com.cswap.widget.extension"
+APPEX_ID="com.cswap.widget.claudeswap"
+# Earlier extension bundle id. chronod caches a widget descriptor keyed on it
+# and would keep serving the pre-rename gallery name, so the extension got a
+# new identity; any registration of the old one must go -- see legacy_appex.
+LEGACY_APPEX_IDS=("com.cswap.widget.extension")
 APPEX_REL="Contents/PlugIns/CswapWidgetExtension.appex"
 DEST="$HOME/Applications/ClaudeSwap.app"
 # Earlier product names (CswapWidgetHost, then cswap). Only ever our own build
@@ -42,6 +46,20 @@ legacy_cleanup() {
         pluginkit -r "$legacy/$APPEX_REL" 2>/dev/null || true
         "$LSREGISTER" -u "$legacy" || true
         rm -rf "$legacy"
+    done
+}
+
+# Drop any registration still held under a previous extension bundle id,
+# wherever it points. Two ids for one widget means two gallery entries, and the
+# stale one is exactly the cached descriptor the rename exists to escape.
+legacy_appex() {
+    local id path
+    for id in "${LEGACY_APPEX_IDS[@]}"; do
+        while IFS= read -r path; do
+            [[ -n "$path" ]] || continue
+            pluginkit -r "$path" 2>/dev/null || true
+            "$LSREGISTER" -u "${path%/Contents/PlugIns/*}" 2>/dev/null || true
+        done < <(pluginkit -m -v -i "$id" 2>/dev/null | awk -F'\t' 'NF > 1 { print $NF }')
     done
 }
 
@@ -100,6 +118,7 @@ install_widget() {
         "$LSREGISTER" -u "$stale" || true
     done
     legacy_cleanup
+    legacy_appex
     rm -rf "$DEST"
     mkdir -p "$(dirname "$DEST")"
     ditto "$BUILT" "$DEST"
@@ -135,6 +154,7 @@ uninstall_widget() {
         sleep 2
     fi
     legacy_cleanup
+    legacy_appex
     ! registered || die \
 "Removed $DEST but the extension is still registered. Something else is
 holding it -- find it with: pluginkit -m -v -i $APPEX_ID"

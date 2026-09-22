@@ -220,6 +220,11 @@ Already installed at `~/Applications/ClaudeSwap.app` and registered:
 pluginkit -m -v | grep -i cswap
 ```
 
+Exactly one line, id `com.cswap.widget.claudeswap`. The extension id and the
+widget kind changed to escape a chronod descriptor cache that kept the gallery
+saying "cswap"; widgets placed before that change are dead and must be removed
+and re-added.
+
 Add it from the widget gallery: right-click the desktop → Edit Widgets → search
 "ClaudeSwap". Small, medium and large page with ‹ ›. Extra-large is
 master-detail: tap an account on the left to show its pace, details and trend

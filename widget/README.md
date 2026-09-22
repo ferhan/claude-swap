@@ -95,8 +95,18 @@ LaunchServices.framework/Versions/A/Support/lsregister -u <the other .app>
 What is registered right now:
 
 ```bash
-pluginkit -m -v -i com.cswap.widget.extension
+pluginkit -m -v -i com.cswap.widget.claudeswap
 ```
+
+The extension was `com.cswap.widget.extension` until the app was renamed to
+ClaudeSwap. chronod caches a widget's descriptor — the gallery's display name
+included — keyed on the extension bundle id and the widget `kind`, in a store
+under `~/Library/Group Containers` that is TCC-protected, so no script can
+clear it; the gallery went on saying "cswap" after every reinstall. The escape
+is a new identity: bundle id `com.cswap.widget.claudeswap`, `kind`
+`ClaudeSwapWidget`. `install` and `uninstall` deregister anything still held
+under the old id. Placed widgets do not survive that change — the old ones
+vanish from the desktop and have to be added again.
 
 ## Signing: the one step
 

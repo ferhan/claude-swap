@@ -84,7 +84,14 @@ targets:
     settings:
       base:
         # Must stay prefixed by the host's bundle id.
-        PRODUCT_BUNDLE_IDENTIFIER: com.cswap.widget.extension
+        #
+        # Was com.cswap.widget.extension. chronod caches a widget descriptor
+        # -- including the gallery's display name -- keyed on the extension's
+        # bundle id, in a store under ~/Library/Group Containers that is
+        # TCC-protected and so cannot be cleared from a script. After the
+        # rename to ClaudeSwap the gallery kept showing "cswap" from that
+        # cache. A new bundle id is a new descriptor; do not go back.
+        PRODUCT_BUNDLE_IDENTIFIER: com.cswap.widget.claudeswap
         # Sandbox + a read exception for the one snapshot file. No App Group:
         # the writer is the user's unsigned PyPI `cswap`, which cannot hold the
         # entitlement a group container demands.

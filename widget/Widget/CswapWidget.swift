@@ -88,7 +88,9 @@ struct WidgetRoot: View {
 }
 
 struct CswapWidget: Widget {
-    nonisolated static let kind = "CswapWidget"
+    // Was "CswapWidget". chronod caches the descriptor per (extension bundle
+    // id, kind) and kept serving the old display name; both had to change.
+    nonisolated static let kind = "ClaudeSwapWidget"
 
     var body: some WidgetConfiguration {
         AppIntentConfiguration(kind: Self.kind, intent: CswapConfigIntent.self, provider: Provider()) { entry in
