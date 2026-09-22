@@ -835,6 +835,14 @@ Defaults live in settings.json in the backup root; flags override them.
             # This process IS the backend: whatever the last one announced on
             # its way out is answered.
             launch_agent.clear_retiring_flag(switcher.backup_dir)
+            # Our stdout/stderr are the launchd log files; nothing else can
+            # rotate them (see launch_agent.trim_log).
+            launch_agent.keep_logs_appending()
+            threading.Thread(
+                target=_trim_logs_periodically,
+                args=(backend_done,),
+                daemon=True,
+            ).start()
             threading.Thread(
                 target=_retire_when_idle,
                 args=(engine, switcher.backup_dir),
@@ -923,6 +931,25 @@ def _retire_when_idle(engine, backup_dir: Path) -> None:
         except Exception:
             pass  # a failed check keeps the backend up; the next one retries
         _time.sleep(_RETIRE_CHECK_SECONDS)
+
+
+# Log size is checked on a slow timer: the backend writes a handful of lines a
+# minute, so nothing can cross the cap between two checks by any amount worth
+# worrying about, and a `stat` every five minutes costs nothing.
+_LOG_TRIM_CHECK_SECONDS = 300.0
+
+
+def _trim_logs_periodically(done) -> None:
+    """Keep the backend's own launchd logs bounded (the backend agent only)."""
+    from claude_swap import launch_agent
+
+    while True:
+        try:
+            launch_agent.trim_backend_logs()
+        except Exception:  # a log we cannot trim must not end the backend
+            pass
+        if done.wait(_LOG_TRIM_CHECK_SECONDS):
+            return
 
 
 # The widget's auto-switch toggle and account rows drop request files (see

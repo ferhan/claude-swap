@@ -91,6 +91,74 @@ def log_paths(label: str = LABEL, home: Path | None = None) -> tuple[Path, Path]
     return logs / f"{label}.log", logs / f"{label}.err"
 
 
+# The backend's launchd logs grow for as long as it runs, and a placed widget
+# keeps it running indefinitely (~1 MB in two days was measured). launchd
+# opens these files and holds the descriptors, so nothing outside the process
+# can rotate them; the backend trims its own.
+LOG_MAX_BYTES = 8 * 1024 * 1024
+
+
+def keep_logs_appending(fds: Sequence[int] = (1, 2)) -> None:
+    """Put this process's stdout and stderr in append mode.
+
+    launchd opens ``StandardOutPath``/``StandardErrorPath`` itself and the
+    descriptors carry whatever flags it chose. Without ``O_APPEND`` every
+    write lands at the descriptor's own offset, so truncating the file (see
+    :func:`trim_log`) would leave the next line written past a hole of NUL
+    bytes and the file as long as ever. ``F_SETFL`` on the open file
+    description makes every write land at the current end, which is what
+    makes in-place truncation actually give the space back.
+
+    Best-effort: a process whose stdout is a terminal or a pipe simply keeps
+    what it has.
+    """
+    if sys.platform == "win32":  # pragma: no cover - macOS-only service
+        return
+    import fcntl
+
+    for fd in fds:
+        try:
+            fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) | os.O_APPEND)
+        except OSError:  # pragma: no cover - closed or exotic descriptor
+            pass
+
+
+def trim_log(path: Path, max_bytes: int = LOG_MAX_BYTES) -> bool:
+    """Roll ``path`` over to ``<path>.1`` and empty it in place. True if it did.
+
+    Renaming the live log is not an option: launchd holds the descriptor for
+    the backend's whole life, so every further line would go to a file nobody
+    can find. The content is copied aside and the original truncated, which
+    keeps the inode launchd writes to.
+
+    Emptied rather than tail-preserved on purpose. ``BackendEventLog`` rewinds
+    to 0 when the file it follows shrank, so any tail left behind would be
+    replayed as new events — the menu bar would notify about yesterday's
+    switches. ``tail -f``, what ``cswap service logs -f`` runs, reports the
+    truncation and follows the same file.
+
+    Limits: lines written between the copy and the truncation are lost (a
+    millisecond window, at a handful of lines per minute), only one generation
+    is kept, and the truncation only reclaims space while writes append (see
+    :func:`keep_logs_appending`).
+    """
+    try:
+        if path.stat().st_size <= max_bytes:
+            return False
+        shutil.copyfile(path, Path(f"{path}.1"))
+        os.truncate(path, 0)
+    except OSError as e:
+        print(f"backend: could not trim {path}: {e}", file=sys.stderr, flush=True)
+        return False
+    return True
+
+
+def trim_backend_logs(home: Path | None = None) -> None:
+    """Trim both of the backend's logs if they have grown too large."""
+    for path in log_paths(AUTO_LABEL, home):
+        trim_log(path, LOG_MAX_BYTES)
+
+
 def service_target(label: str = LABEL, uid: int | None = None) -> str:
     """launchd service target, e.g. ``gui/501/com.cswap.menubar``."""
     return f"gui/{os.getuid() if uid is None else uid}/{label}"

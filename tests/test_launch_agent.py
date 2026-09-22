@@ -815,6 +815,76 @@ class TestRetireBackendIfIdle:
         assert launch_agent.plist_path(launch_agent.AUTO_LABEL, tmp_path).exists()
 
 
+class TestTrimTheBackendLogs:
+    """``~/Library/Logs/com.cswap.auto.{log,err}`` grow forever otherwise.
+
+    launchd holds the descriptors, so the file has to keep its inode: rolled
+    over by copy + in-place truncation, never by rename.
+    """
+
+    def _log(self, tmp_path: Path, size: int) -> Path:
+        path = tmp_path / "com.cswap.auto.log"
+        path.write_text("x" * size)
+        return path
+
+    def test_rolls_over_and_empties_in_place(self, tmp_path):
+        path = self._log(tmp_path, 100)
+        before = path.stat().st_ino
+
+        assert launch_agent.trim_log(path, max_bytes=50) is True
+
+        assert path.stat().st_size == 0
+        assert path.stat().st_ino == before, "launchd writes to the inode"
+        assert Path(f"{path}.1").read_text() == "x" * 100
+
+    def test_leaves_a_log_under_the_cap_alone(self, tmp_path):
+        path = self._log(tmp_path, 100)
+        assert launch_agent.trim_log(path, max_bytes=1000) is False
+        assert path.stat().st_size == 100
+        assert not Path(f"{path}.1").exists()
+
+    def test_keeps_no_tail_a_reader_would_replay(self, tmp_path):
+        # BackendEventLog rewinds to 0 when the file shrank, so anything left
+        # behind comes back as new events (the menu bar would notify on it).
+        path = self._log(tmp_path, 100)
+        launch_agent.trim_log(path, max_bytes=50)
+        assert path.read_text() == ""
+
+    def test_a_missing_log_is_not_an_error(self, tmp_path):
+        assert launch_agent.trim_log(tmp_path / "gone.log", max_bytes=1) is False
+
+    def test_trims_both_of_the_backends_logs(self, tmp_path):
+        out, err = launch_agent.log_paths(launch_agent.AUTO_LABEL, tmp_path)
+        out.parent.mkdir(parents=True)
+        out.write_text("o" * 100)
+        err.write_text("e" * 100)
+
+        with patch.object(launch_agent, "LOG_MAX_BYTES", 50):
+            launch_agent.trim_backend_logs(tmp_path)
+
+        assert out.stat().st_size == 0 and err.stat().st_size == 0
+
+    def test_a_log_descriptor_is_put_in_append_mode(self, tmp_path):
+        # Without O_APPEND a write after the truncation lands at the old
+        # offset and leaves a hole of NULs the whole length of the log. The
+        # real call takes fds 1 and 2, which launchd opened.
+        import fcntl
+
+        path = self._log(tmp_path, 100)
+        fd = os.open(path, os.O_WRONLY)
+        try:
+            assert not fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_APPEND, "premise"
+            launch_agent.keep_logs_appending([fd])
+            assert fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_APPEND
+            # And the flag does what the truncation needs: a write after it
+            # goes to the end, not to this descriptor's stale offset.
+            os.truncate(path, 0)
+            os.write(fd, b"after\n")
+        finally:
+            os.close(fd)
+        assert path.read_bytes() == b"after\n"
+
+
 class TestARetiringBackendIsNotARunningOne:
     """Retirement is not instantaneous, so it has to be observable.
 
