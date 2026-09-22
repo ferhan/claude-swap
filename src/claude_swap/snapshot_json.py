@@ -254,20 +254,32 @@ def write_snapshot(path: Path, payload: dict) -> None:
 
     Only the target file is hardened — the parent directory is the caller's
     (``--out`` can point anywhere) and is left at whatever mode it has.
+
+    **Writes THROUGH a symlink, never over it**, exactly as
+    ``settings.atomic_write_json`` does and for the same reason (#192/#193): a
+    rename swaps a directory entry without following links, so renaming onto a
+    symlinked path detaches the link — the write succeeds, the content is
+    right, and the target silently stops being updated. That is a live
+    possibility here: ``--out`` points wherever the caller says, and the
+    default path is one a widget reads by absolute path. The temp file is
+    created beside the RESOLVED target so the rename stays on one filesystem,
+    and a dangling link still writes where it points.
     """
     if path.is_dir():
         raise ClaudeSwitchError(
             f"--out must be a file path, not a directory: {path}"
         )
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    target = Path(os.path.realpath(path)) if path.is_symlink() else path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
     try:
         os.write(fd, json.dumps(payload, indent=2).encode("utf-8"))
         os.close(fd)
         fd = -1
-        replace_with_retry(tmp_path, str(path))
+        replace_with_retry(tmp_path, str(target))
         if sys.platform != "win32":
-            os.chmod(str(path), 0o600)
+            os.chmod(str(target), 0o600)
     except BaseException:
         if fd >= 0:
             os.close(fd)

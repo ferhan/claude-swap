@@ -432,6 +432,55 @@ def test_write_snapshot_rejects_a_directory(tmp_path: Path):
         write_snapshot(tmp_path, {"schemaVersion": SCHEMA_VERSION})
 
 
+class TestWriteSnapshotThroughSymlink:
+    """Same rule as ``settings.atomic_write_json`` (#192/#193): a rename
+    swaps a directory entry without following links, so renaming onto a
+    symlinked path detaches it and the target silently stops updating."""
+
+    def test_the_link_survives_and_the_target_is_updated(self, tmp_path: Path):
+        elsewhere = tmp_path / "elsewhere"; elsewhere.mkdir()
+        target = elsewhere / "snapshot.json"
+        target.write_text("{}")
+        link = tmp_path / "snapshot.json"
+        link.symlink_to(target)
+
+        write_snapshot(link, {"schemaVersion": SCHEMA_VERSION})
+
+        assert link.is_symlink(), "the link must survive the publish"
+        assert json.loads(target.read_text())["schemaVersion"] == SCHEMA_VERSION
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+    def test_a_dangling_link_writes_where_it_points(self, tmp_path: Path):
+        target = tmp_path / "gone" / "snapshot.json"
+        link = tmp_path / "snapshot.json"
+        link.symlink_to(target)
+
+        write_snapshot(link, {"schemaVersion": SCHEMA_VERSION})
+
+        assert link.is_symlink()
+        assert json.loads(target.read_text())["schemaVersion"] == SCHEMA_VERSION
+
+    def test_the_temp_file_goes_beside_the_resolved_target(self, tmp_path: Path):
+        # Beside the LINK it would hit EXDEV whenever the target is on
+        # another mount. Asserted directly; two filesystems are not portable.
+        import tempfile
+
+        elsewhere = tmp_path / "elsewhere"; elsewhere.mkdir()
+        target = elsewhere / "snapshot.json"
+        link = tmp_path / "snapshot.json"
+        link.symlink_to(target)
+        seen = []
+        real_mkstemp = tempfile.mkstemp
+
+        def spy(*args, **kwargs):
+            seen.append(kwargs.get("dir"))
+            return real_mkstemp(*args, **kwargs)
+
+        with patch("claude_swap.snapshot_json.tempfile.mkstemp", spy):
+            write_snapshot(link, {"schemaVersion": SCHEMA_VERSION})
+        assert seen == [str(elsewhere)]
+
+
 def test_write_snapshot_leaves_no_temp_file_on_failure(tmp_path: Path):
     out = tmp_path / "snapshot.json"
     with patch("claude_swap.fsutil.os.replace", side_effect=OSError("boom")):
