@@ -392,6 +392,7 @@ Shared/Trend.swift                       24h trend: samples in range, time axis,
 Shared/Navigation.swift                  selection state: select, neighbor, back, scroll, resolve
 Shared/AutoswitchToggle.swift            toggle request file + pending-state resolution
 Shared/AccountSwitch.swift               switch request file, eligibility, pending-state resolution
+Shared/CompactAction.swift               what small's and medium's one action spot carries
 Shared/BackendStart.swift                start URL, start/failure markers, "Starting…", finding cswap
 Shared/RequestDrop.swift                 atomic dot-temp + rename writes into the drop directory
 Widget/CswapWidgetBundle.swift           @main WidgetBundle
@@ -400,10 +401,11 @@ Widget/Intents.swift                     Appearance config intent, ‹ › page,
                                          back, scroll, refresh and auto-switch intents,
                                          page/nav/toggle stores
 Widget/Components.swift                  ring, bar, badges, window row, pager
-Widget/Pages.swift                       small's one-account page; medium's hero, right column and ‹ ›
+Widget/Pages.swift                       the widget view, page context, hero parts, small's page
+Widget/MediumPage.swift                  medium: the left column's picture, the right column, ‹ ›
 Widget/LargePages.swift                  large: list/detail routing, the list, the trend panel
-Widget/AutoStatusLine.swift              the auto-switch chip and its state line
-Widget/ActionControls.swift              Switch to this account, Start backend
+Widget/AutoStatusLine.swift              the auto-switch chip, its state line and its compact form
+Widget/ActionControls.swift              the compact action spot: Switch, Start backend
 Widget/ExtraLargePage.swift              extra-large master-detail: rows, pace, model usage
 Widget/DetailPages.swift                 the facts grid, and large's drill-down detail view
 Widget/SnapshotFile.swift                the only place the snapshot and request paths are decided
@@ -413,6 +415,7 @@ Tests/AutoswitchFixtureTests.swift       decodes Tests/Fixtures/snapshot_autoswi
 Tests/DisplayTests.swift                 Shared/Display.swift
 Tests/AutoswitchToggleTests.swift        Shared/AutoswitchToggle.swift
 Tests/AccountSwitchTests.swift           Shared/AccountSwitch.swift
+Tests/CompactActionTests.swift           Shared/CompactAction.swift
 Tests/BackendStartTests.swift            Shared/BackendStart.swift
 ```
 
@@ -437,43 +440,60 @@ never sees it half-written.
 ## Status
 
 All four sizes (small, medium, large, extra-large), a per-widget Appearance
-setting (System/Light/Dark, from Edit Widget), and an auto-switch line with a
-toggle on large and extra-large, and "Switch to this account" wherever an
-account is shown. When the snapshot is more than 3 minutes old the
+setting (System/Light/Dark, from Edit Widget), and an auto-switch
+toggle on every size -- a line of its own on large and extra-large, a chip in
+the one action spot on small and medium -- and "Switch to this account"
+wherever an account is shown. When the snapshot is more than 3 minutes old the
 header says "Backend stopped · updated 13m ago" instead of the time, with a
 "Start backend" chip (both shortened where tight). Small is the one size that
 still pages with ‹ ›, and its pages are the accounts: one per login, nothing
 else.
 
-Small is that one account at 164×164: the initials badge and name, the 5h ring
-with its ticking countdown, the weekly bar with its percent and `3d 11h`, and
-a bottom line holding the pager and -- in the spot the active account's
-"Active" takes -- the switch control for any other account (`⇄ Switch`,
-`Switching…`, `↻ Retry`, `No login`, `▶ Start`). So the account on screen is
-always the one a tap switches to. With one account the ‹ › are dimmed: they
-still wrap, they just have nowhere to go.
+Small is that one account at 164×164: the initials badge and name with a green
+dot when it is the account in use, the 5h ring with its ticking countdown, the
+weekly bar with its percent and `3d 11h`, and a bottom line holding the pager
+and one action spot -- 62pt of it, beside a 72pt pager. What goes in that spot
+is `CompactSlot.resolve`: the auto-switch toggle on the active account's page
+(`⟳ ● 85%` / `⟳ ● Off`, the same `Toggle(isOn:intent:)` large and extra-large
+carry, with ⏳ or ! in place of the glyph while a request is out or was never
+delivered), the switch control on any other (`⇄ Switch`, `Switching…`,
+`↻ Retry`, `No login`, `Disabled`), and `▶ Start` over both of them when the
+backend has stopped -- nothing else there would be applied. The dot beside the
+name is what says "active", so the word is not spent on the one line that can
+hold a control. With one account the ‹ › are dimmed: they still wrap, they
+just have nowhere to go.
 
 Medium, large and extra-large all keep a selection in one `NavState`
 (mode, selection, list offset) per size; only large has a detail mode.
 
-Medium is master-detail for one account at a time, at 344×164. The left column
-is the compact hero -- initials, name, subtitle, the 5h ring with its ticking
-countdown, the weekly bar with its percent and `3d 11h` -- at a fixed 150pt.
-The 147pt right column is the same account's detail, and repeats none of it:
-‹ 2/6 › and the auto-switch badge on the top line, the email across the full
-width below it (10.5pt, scaling to 0.75 before it truncates at the tail), then
-the facts grid in its compact form -- org, alias, `kind`/`updated` sharing a
-row, status -- at 10pt, and the switch control on the bottom line. "BY MODEL"
-is what does not fit in the remaining ~13pt and is the one thing extra-large's
-right column has that medium's does not; the trend and the pace strip are the
-others.
+Medium is master-detail for one account at a time, at 344×164, split into a
+picture and an account. The 150pt left column is the picture: the 5h ring at
+64pt with its ticking countdown, the weekly bar with its percent and `3d 11h`,
+and under them a 34pt sparkline of that account's 5h history over the trend's
+own time axis, with the threshold as a dashed rule. When the backend has
+stopped, the control that starts it takes the sparkline's place -- the left
+column is where medium offers the start, which is what frees its right column
+to stay about the account.
+
+The 147pt right column carries the identity, once: the badge, the email across
+the line (10.5pt, scaling to 0.7 before it truncates at the tail) and the green
+dot when it is the account in use, then the facts grid in its compact form --
+org, alias, `kind`/`updated` sharing a row, status -- at 10pt. Its bottom line
+is laid out as small's is: the same action spot on the left (77pt here) and
+‹ 2/6 › on the right. Medium differs from small in one way, and only when the
+backend has stopped: its left column is already offering the start, so the spot
+keeps the auto chip, drawn inert. "BY MODEL" is what does not fit and is the one
+thing extra-large's right column has that medium's does not; the pace strip is
+the other.
 
 The ‹ › move the **selection**, not a page: they run the same
 `SelectAccountIntent` a row tap runs on the larger sizes, on the account
 `Navigation.neighbor` returns, wrapping at both ends. So medium has no detail
 page and no `PageStore` entry at all -- selection is its whole navigation.
-The auto-switch badge is read-only here (the toggle needs the room large and
-extra-large have) and shortens to `⇄ 85%` before it is dropped.
+The read-only auto badge that shared medium's top line with the ‹ › is gone:
+the arrows moved to the bottom right and the email took that line, and the
+action spot below now carries the toggle itself. Auto-switch is shown once per
+size, and on medium it is shown where it can be pressed.
 
 Large and extra-large are master-detail with no pager. The account list is the
 same on both: three rows per window at 344pt, each a three-line button that selects it

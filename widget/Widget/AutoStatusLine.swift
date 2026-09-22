@@ -20,24 +20,37 @@ struct AutoswitchChip: View {
     /// thing carrying it.
     let stateText: String
     var isDisabled = false
+    /// Small and medium's action spot, where the whole chip has ~62pt: the
+    /// words "Auto-switch" give way to the glyph alone, and the type drops to
+    /// the compact scale the switch chip beside it already uses.
+    var compact = false
+    /// The glyph, which is also where a compact chip carries a pending or
+    /// undelivered request -- there is no room for those in words.
+    var symbol = "arrow.triangle.2.circlepath"
     @Environment(\.widgetRenderingMode) private var mode
 
     var body: some View {
-        HStack(spacing: 6) {
-            Label("Auto-switch", systemImage: "arrow.triangle.2.circlepath")
-                .labelStyle(.titleAndIcon)
-                .font(.system(size: 12, weight: .semibold))
-                .fixedSize()
+        let size: CGFloat = compact ? 10 : 12
+        HStack(spacing: compact ? 4 : 6) {
+            Group {
+                if compact {
+                    Image(systemName: symbol)
+                } else {
+                    Label("Auto-switch", systemImage: symbol).labelStyle(.titleAndIcon)
+                }
+            }
+            .font(.system(size: size, weight: .semibold))
+            .fixedSize()
             Circle()
                 .fill(dot)
-                .frame(width: 9, height: 9)
+                .frame(width: compact ? 7 : 9, height: compact ? 7 : 9)
             Text(stateText)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: size, weight: .semibold))
                 .fixedSize()
         }
         .foregroundStyle(isDisabled ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, compact ? 6 : 8)
+        .padding(.vertical, compact ? 3 : 4)
         .background(Capsule().fill(.primary.opacity(isDisabled ? 0.04 : 0.1)))
         .overlay(Capsule().stroke(.primary.opacity(isDisabled ? 0.08 : 0.15), lineWidth: 1))
         .contentShape(Capsule())
@@ -56,9 +69,53 @@ struct AutoswitchChip: View {
 struct AutoswitchChipStyle: ToggleStyle {
     let resolved: ToggleResolution
     let stateText: String
+    var compact = false
+    var symbol = "arrow.triangle.2.circlepath"
 
     func makeBody(configuration: Configuration) -> some View {
-        AutoswitchChip(isOn: resolved.isOn, stateText: stateText)
+        AutoswitchChip(isOn: resolved.isOn, stateText: stateText, compact: compact, symbol: symbol)
+    }
+}
+
+/// The auto-switch toggle in small's and medium's action spot: the chip on its
+/// own, with `85%` or `Off` as its state and the glyph carrying what the wider
+/// line says beside itself -- ⏳ while a request is out, ! when the write
+/// never landed. Draws nothing when the snapshot carries no auto-switch block:
+/// there is then no state to toggle.
+struct CompactAutoControl: View {
+    let context: PageContext
+
+    var body: some View {
+        if let auto = context.snapshot.autoswitch, let toggle = context.toggle {
+            let stateText = toggle.isOn ? Format.pct(auto.threshold) : "Off"
+            let symbol = symbol(toggle)
+            if toggle.isDisabled {
+                AutoswitchChip(isOn: toggle.isOn, stateText: stateText, isDisabled: true,
+                               compact: true, symbol: symbol)
+                    .accessibilityLabel("Auto-switch \(toggle.isOn ? "on" : "off"), backend stopped")
+            } else {
+                Toggle(isOn: toggle.isOn, intent: SetAutoswitchIntent(enabled: !toggle.isOn)) {
+                    EmptyView()
+                }
+                .toggleStyle(AutoswitchChipStyle(resolved: toggle, stateText: stateText,
+                                                 compact: true, symbol: symbol))
+                .fixedSize()
+                .accessibilityLabel(label(toggle, stateText: stateText))
+            }
+        }
+    }
+
+    private func symbol(_ toggle: ToggleResolution) -> String {
+        if toggle.isPending { return "clock" }
+        if toggle.backendNotRunning { return "exclamationmark.circle" }
+        return "arrow.triangle.2.circlepath"
+    }
+
+    private func label(_ toggle: ToggleResolution, stateText: String) -> String {
+        let state = toggle.isOn ? "on, at \(stateText)" : "off"
+        if toggle.isPending { return "Auto-switch \(state), applying" }
+        if toggle.backendNotRunning { return "Auto-switch \(state), backend not running" }
+        return "Auto-switch \(state)"
     }
 }
 

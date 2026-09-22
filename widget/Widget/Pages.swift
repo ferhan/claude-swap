@@ -140,11 +140,15 @@ struct HeroHeader: View {
 struct HeroGauge: View {
     let account: Account
     let context: PageContext
+    /// Medium draws it larger: with the name line gone from that column, the
+    /// ring is what the freed height goes to.
+    var ringSize: CGFloat = 54
 
     var body: some View {
         let fiveHour = account.usage?.fiveHour
         HStack(spacing: 10) {
-            UsageRing(pct: fiveHour?.pct, threshold: context.threshold, dimmed: account.isStale)
+            UsageRing(pct: fiveHour?.pct, threshold: context.threshold,
+                      size: ringSize, lineWidth: ringSize > 54 ? 7 : 6, dimmed: account.isStale)
             VStack(alignment: .leading, spacing: 1) {
                 Text("RESETS IN")
                     .font(.system(size: 8.5, weight: .medium))
@@ -211,10 +215,11 @@ struct NoUsage: View {
 // MARK: - Small
 
 /// Small is one hero per account: ‹ › walk the logins, with no detail page
-/// between them. The bottom line is "Active" for the account in use and the
-/// switch control -- in its compact form, with all its states -- for any
-/// other, so the page the user is looking at is also the one they can switch
-/// to.
+/// between them. The green dot beside the name is what says the page is the
+/// account in use, so the bottom line spends its 62pt on something to press:
+/// the auto-switch toggle on the active account's page, the switch control --
+/// in its compact form, with all its states -- on any other, so the page the
+/// user is looking at is also the one they can switch to.
 struct SmallPage: View {
     let context: PageContext
     let accountNumber: Int
@@ -222,7 +227,7 @@ struct SmallPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let account = context.snapshot.account(number: accountNumber) {
-                HeroHeader(account: account)
+                HeroHeader(account: account, showsActiveDot: true)
                 Spacer(minLength: 4)
                 if account.usage != nil {
                     HeroGauge(account: account, context: context)
@@ -233,141 +238,11 @@ struct SmallPage: View {
                 }
                 Spacer(minLength: 4)
                 HStack(spacing: 4) {
-                    SwitchControl(account: account, context: context, compact: true)
+                    CompactActionControl(account: account, context: context)
                     Spacer(minLength: 2)
                     context.pager
                 }
             }
-        }
-    }
-}
-
-// MARK: - Medium
-
-/// Medium is master-detail for one account at a time: the compact hero on the
-/// left -- the gauge, the weekly bar and the countdowns -- and that same
-/// account's details on the right. The ‹ › at the top of the right column move
-/// the selection, not a page, so nothing is ever shown twice; there is no
-/// detail page to drill into.
-struct MediumPage: View {
-    let context: PageContext
-    /// Already resolved: mode is `.list` and a selection is set.
-    let nav: NavState
-
-    var body: some View {
-        let accounts = context.snapshot.orderedAccounts
-        let selected = nav.selectedAccountNumber.flatMap { context.snapshot.account(number: $0) }
-            ?? accounts[0]
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 0) {
-                HeroHeader(account: selected, showsActiveDot: true)
-                Spacer(minLength: 4)
-                if selected.usage != nil {
-                    HeroGauge(account: selected, context: context)
-                    Spacer(minLength: 4)
-                    HeroWeekly(account: selected, context: context)
-                } else {
-                    NoUsage(account: selected)
-                }
-                Spacer(minLength: 0)
-            }
-            .frame(width: 150)
-            Divider()
-            MediumDetail(account: selected, accounts: accounts, context: context)
-        }
-    }
-}
-
-/// The right column: the selection's arrows, then the account's email across
-/// the full width, its facts, and the switch control. Everything the hero on
-/// the left already draws -- bars, percentages, countdowns -- is left out.
-///
-/// 147pt wide, so "BY MODEL" is the one thing from the extra-large right
-/// column that does not fit here.
-struct MediumDetail: View {
-    let account: Account
-    let accounts: [Account]
-    let context: PageContext
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 4) {
-                SelectionPager(account: account, accounts: accounts, family: context.family)
-                Spacer(minLength: 2)
-                // The words go before the chip does.
-                ViewThatFits(in: .horizontal) {
-                    AutoBadge(snapshot: context.snapshot)
-                    AutoBadge(snapshot: context.snapshot, short: true)
-                }
-            }
-            // A line of its own: at this width half a grid cell cut every
-            // address worth reading.
-            Text(account.email)
-                .font(.system(size: 10.5, weight: .semibold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            AccountFactsGrid(account: account, context: context, compact: true)
-            Spacer(minLength: 2)
-            SwitchControl(account: account, context: context, compact: true)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-}
-
-/// `‹ 2/6 ›`: which account the widget is on, and the arrows that move it.
-/// They select rather than page -- the same `SelectAccountIntent` a row tap
-/// runs on the larger sizes -- so medium's whole navigation is the selection.
-struct SelectionPager: View {
-    let account: Account
-    let accounts: [Account]
-    let family: LayoutFamily
-
-    var body: some View {
-        let position = (accounts.firstIndex { $0.number == account.number } ?? 0) + 1
-        HStack(spacing: 4) {
-            button(delta: -1, symbol: "chevron.left", name: "Previous account")
-            Text("\(position)/\(accounts.count)")
-                .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .fixedSize()
-            button(delta: 1, symbol: "chevron.right", name: "Next account")
-        }
-    }
-
-    private func button(delta: Int, symbol: String, name: String) -> some View {
-        let target = Navigation.neighbor(of: account.number, in: accounts, by: delta) ?? account.number
-        return Button(intent: SelectAccountIntent(family: family, number: target)) {
-            Image(systemName: symbol)
-                .font(.system(size: 9, weight: .bold))
-                .frame(width: 20, height: 20)
-                .background(Circle().fill(.primary.opacity(0.1)))
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .opacity(accounts.count > 1 ? 1 : 0.3)
-        .accessibilityLabel(name)
-    }
-}
-
-/// `⇄ Auto at 90%` / `Auto off`, or just the figure where it is tight;
-/// nothing when the snapshot predates it.
-struct AutoBadge: View {
-    let snapshot: Snapshot
-    var short = false
-
-    var body: some View {
-        if let auto = snapshot.autoswitch {
-            let text = auto.enabled ? "Auto at \(Format.pct(auto.threshold))" : "Auto off"
-            Label(short ? (auto.enabled ? Format.pct(auto.threshold) : "Off") : text,
-                  systemImage: auto.enabled ? "arrow.left.arrow.right" : "pause.circle")
-                .font(.system(size: 9.5, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .fixedSize()
-                .accessibilityLabel(text)
         }
     }
 }

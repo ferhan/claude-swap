@@ -98,18 +98,42 @@ struct StartBackendControl: View {
     }
 }
 
+/// Small's bottom line and medium's, beside the ‹ ›: one spot that carries the
+/// start control, the auto-switch toggle or the switch control, whichever the
+/// state calls for (`CompactSlot` decides). Small has 62pt of it and medium
+/// 77pt, which is what every shortened form in this file is for.
+struct CompactActionControl: View {
+    let account: Account
+    let context: PageContext
+
+    var body: some View {
+        let action = CompactSlot.resolve(
+            family: context.family,
+            eligibility: account.switchEligibility(activeNumber: context.snapshot.activeAccountNumber),
+            backendStale: context.isBackendStale,
+            hasAutoswitch: context.snapshot.autoswitch != nil)
+        switch action {
+        case .start:
+            ViewThatFits(in: .horizontal) {
+                StartBackendControl(context: context, compact: true)
+                StartBackendControl(context: context, short: true, compact: true)
+            }
+        case .auto:
+            CompactAutoControl(context: context)
+        case .switchAccount:
+            SwitchControl(account: account, context: context, compact: true)
+        }
+    }
+}
+
 /// The shown account's switch control: a button for an account that can
 /// be switched to, "Active" for the active one, and the pending/failed state
 /// of a request.
 ///
-/// With the backend stopped nothing would apply a request, so the control
-/// gives way to "Start backend". On small and medium it gives way whatever
-/// the account is, the active one included: this spot is the only place those
-/// two sizes can offer a start, and the header chip large and extra-large
-/// carry is what keeps the rule to the eligible account there.
-///
-/// Small draws it in the same spot "Active" takes, with 62pt beside the
-/// pager, which is what every shortened form here is for.
+/// With the backend stopped nothing would apply a request, so for an eligible
+/// account the control gives way to "Start backend". Small and medium never
+/// reach that branch: `CompactActionControl` has already decided what a
+/// stopped backend puts in their one spot.
 struct SwitchControl: View {
     let account: Account
     let context: PageContext
@@ -118,7 +142,7 @@ struct SwitchControl: View {
 
     var body: some View {
         let eligibility = account.switchEligibility(activeNumber: context.snapshot.activeAccountNumber)
-        if context.isBackendStale && (compact || eligibility == .eligible) {
+        if context.isBackendStale && eligibility == .eligible {
             ViewThatFits(in: .horizontal) {
                 StartBackendControl(context: context, compact: compact)
                 StartBackendControl(context: context, short: true, compact: compact)
