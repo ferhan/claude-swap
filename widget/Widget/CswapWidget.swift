@@ -72,15 +72,17 @@ struct WidgetRoot: View {
             .environment(\.colorScheme, scheme)
     }
 
-    /// System: a translucent system fill, so the platform's own material
-    /// (Liquid Glass on macOS 26) and desktop tinting show through.
+    /// System: the window background, mostly opaque. A lighter fill let
+    /// Liquid Glass wash the text out on a light desktop; this keeps a hint
+    /// of the desktop behind it. Accented and vibrant rendering drop the
+    /// container background, so those modes are unaffected.
     /// Forced modes: the glass still follows the system appearance, so they
     /// lay their own light/dark tint over it to keep the forced text legible.
     @ViewBuilder private var background: some View {
         switch entry.appearance {
-        case .system: Rectangle().fill(.fill.tertiary)
-        case .light: Color.white.opacity(0.55)
-        case .dark: Color.black.opacity(0.45)
+        case .system: Rectangle().fill(.background.opacity(0.88))
+        case .light: Color.white.opacity(0.88)
+        case .dark: Color(white: 0.11).opacity(0.88)
         }
     }
 }

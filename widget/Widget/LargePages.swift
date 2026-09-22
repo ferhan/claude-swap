@@ -44,10 +44,10 @@ struct BrandTitle: View {
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "arrow.left.arrow.right")
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.tint)
                 .widgetAccentable()
-            Text("ClaudeSwap").font(.system(size: 13, weight: .bold)).fixedSize()
+            Text("ClaudeSwap").font(.system(size: 14, weight: .bold)).fixedSize()
             if context.isBackendStale {
                 // The wording shortens before the message is cut short.
                 let age = context.now.timeIntervalSince(context.snapshot.takenAt)
@@ -55,43 +55,56 @@ struct BrandTitle: View {
                     backendDown(Format.backendDown(age: age))
                     backendDown("Backend not running · \(Format.age(seconds: age))")
                     backendDown("Backend not running")
+                    backendDown("Not running")
                 }
             } else {
-                Text("as of \(context.snapshot.takenAt.formatted(date: .omitted, time: .shortened))")
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                let time = context.snapshot.takenAt.formatted(date: .omitted, time: .shortened)
+                ViewThatFits(in: .horizontal) {
+                    asOf("as of \(time)")
+                    asOf(time)
+                }
             }
         }
+    }
+
+    private func asOf(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .fixedSize()
     }
 
     private func backendDown(_ text: String) -> some View {
         Label(text, systemImage: "exclamationmark.circle")
             .labelStyle(.titleAndIcon)
-            .font(.system(size: 9.5, weight: .medium))
+            .font(.system(size: 11, weight: .medium))
             .foregroundStyle(.secondary)
             .lineLimit(1)
             .fixedSize()
     }
 }
 
-/// The auto-switch line: a toggle, its state, and who is next up. The toggle
-/// drops a request for the backend (see `SetAutoswitchIntent`) and shows the
-/// asked-for state, marked pending, until the snapshot agrees.
+/// The auto-switch line: a labeled switch, its threshold, and who is next up.
+/// The toggle drops a request for the backend (see `SetAutoswitchIntent`) and
+/// shows the asked-for state, marked pending, until the snapshot agrees.
 struct AutoStatusLine: View {
     let context: PageContext
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
             if let auto = context.snapshot.autoswitch, let toggle = context.toggle {
                 Toggle(isOn: toggle.isOn, intent: SetAutoswitchIntent(enabled: !toggle.isOn)) {
-                    Text("Auto-switch")
+                    Label("Auto-switch", systemImage: "arrow.triangle.2.circlepath")
+                        .labelStyle(.titleAndIcon)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.primary)
                 }
                 .toggleStyle(.switch)
-                .controlSize(.mini)
-                .labelsHidden()
-                .accessibilityLabel("Auto-switch")
-                Text(toggle.isOn ? "Auto-switch at \(Format.pct(auto.threshold))" : "Auto-switch off")
+                .controlSize(.regular)
+                .fixedSize()
+                .contentShape(Rectangle())
+                Text(toggle.isOn ? "at \(Format.pct(auto.threshold))" : "Off")
                     .fontWeight(.semibold)
                     .foregroundStyle(.primary)
                     .fixedSize()
@@ -99,19 +112,24 @@ struct AutoStatusLine: View {
                     Label("applying…", systemImage: "clock").labelStyle(.titleAndIcon).fixedSize()
                 } else if toggle.backendNotRunning && !context.isBackendStale {
                     // A stale snapshot already says so in the header.
-                    Label("backend not running", systemImage: "exclamationmark.circle")
-                        .labelStyle(.titleAndIcon)
-                        .fixedSize()
+                    ViewThatFits(in: .horizontal) {
+                        notRunning("backend not running")
+                        notRunning("not running")
+                    }
                 } else if toggle.isOn, let next = context.snapshot.nextCandidate {
-                    Text("· next up").fixedSize()
-                    InitialsBadge(account: next, size: 14)
-                    // The "(12% used)" goes before the name is cut short.
+                    // The "(12% used)" goes first, then the name; the badge
+                    // stays rather than showing a stub of the name.
                     ViewThatFits(in: .horizontal) {
                         HStack(spacing: 5) {
+                            nextUp(next)
                             nextTitle(next).fixedSize()
                             if let peak = next.peakPct { Text("(\(Format.pct(peak)) used)").fixedSize() }
                         }
-                        nextTitle(next)
+                        HStack(spacing: 5) {
+                            nextUp(next)
+                            nextTitle(next).fixedSize()
+                        }
+                        nextUp(next)
                     }
                 }
             } else {
@@ -119,13 +137,27 @@ struct AutoStatusLine: View {
                 Text("Auto-switch status unavailable · threshold \(Format.pct(Display.defaultThreshold))")
             }
         }
-        .font(.system(size: 10.5))
+        .font(.system(size: 12))
         .foregroundStyle(.secondary)
         .lineLimit(1)
+        .frame(minHeight: 24)
+    }
+
+    private func notRunning(_ text: String) -> some View {
+        Label(text, systemImage: "exclamationmark.circle")
+            .labelStyle(.titleAndIcon)
+            .fixedSize()
+    }
+
+    private func nextUp(_ account: Account) -> some View {
+        HStack(spacing: 5) {
+            Text("· next").fixedSize()
+            InitialsBadge(account: account, size: 20)
+        }
     }
 
     private func nextTitle(_ account: Account) -> some View {
-        AccountTitle(account: account, font: .system(size: 10.5, weight: .semibold))
+        AccountTitle(account: account, font: .system(size: 12, weight: .semibold))
             .foregroundStyle(.primary)
     }
 }
@@ -138,11 +170,11 @@ struct AccountCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
-                InitialsBadge(account: account, size: 18)
-                AccountTitle(account: account, font: .system(size: 12, weight: .semibold))
+                InitialsBadge(account: account, size: 22)
+                AccountTitle(account: account, font: .system(size: 12.5, weight: .semibold))
                     .layoutPriority(1)
                 Text(account.subtitle)
-                    .font(.system(size: 9.5))
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer(minLength: 2)
@@ -162,13 +194,13 @@ struct AccountCard: View {
                 }
             } else {
                 Text(account.statusText)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.primary)
             }
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 7)
-        .background(RoundedRectangle(cornerRadius: 11).fill(.primary.opacity(0.05)))
+        .background(RoundedRectangle(cornerRadius: 11).fill(.primary.opacity(0.06)))
         .overlay {
             if account.active {
                 RoundedRectangle(cornerRadius: 11)
@@ -192,73 +224,13 @@ struct PaceNote: View {
                 Text("Ahead of pace")
             }
         }
-        .font(.system(size: 9.5, weight: .semibold))
+        .font(.system(size: 11, weight: .semibold))
         .foregroundStyle(.secondary)
         .padding(.leading, 42)
     }
 }
 
 // MARK: - Extra-large panels
-
-struct PacePanel: View {
-    let context: PageContext
-    let account: Account
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 4) {
-                Text("Weekly pace").font(.system(size: 11, weight: .bold))
-                Text("· \(account.label)")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            if let window = account.usage?.sevenDay {
-                HStack(alignment: .top, spacing: 16) {
-                    stat(paceTitle(window), window.expectedPct.map { "\(Format.pct($0)) expected by now" }
-                            ?? "not enough data yet")
-                    stat(Format.pct(window.pct), "used")
-                    if window.willLastToReset == false, let runsOut = window.projectedExhaustionAt {
-                        stat(runsOut.formatted(date: .abbreviated, time: .shortened), "runs out")
-                    } else if window.willLastToReset == true {
-                        stat("Lasts", "to reset")
-                    }
-                    if let resetsAt = window.resetsAt {
-                        stat(resetsAt.formatted(.dateTime.month(.abbreviated).day()),
-                             "resets · \(Format.countdown(to: resetsAt, now: context.now))")
-                    }
-                }
-                UsageBar(pct: window.pct, threshold: context.threshold)
-            } else {
-                Text("No weekly window for this account.")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-            }
-            if let spend = account.usage?.spend {
-                Text("Spend \(spend.used.formatted(.currency(code: spend.currency))) / "
-                     + spend.limit.formatted(.currency(code: spend.currency)))
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private func paceTitle(_ window: Window) -> String {
-        switch window.aheadOfPace {
-        case true?: "Ahead"
-        case false?: "On pace"
-        case nil: "Pace unknown"
-        }
-    }
-
-    private func stat(_ value: String, _ caption: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(value).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-            Text(caption).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
-        }
-    }
-}
 
 struct TrendPanel: View {
     let context: PageContext
@@ -272,13 +244,14 @@ struct TrendPanel: View {
         let span = Trend.span(context.snapshot, now: context.now)
         VStack(alignment: .leading, spacing: 5) {
             HStack {
-                Text("5h usage · \(span.caption)").font(.system(size: 11, weight: .bold))
+                Text("5h usage · \(span.caption)").font(.system(size: 12.5, weight: .bold)).lineLimit(1)
                 Spacer()
-                HStack(spacing: 8) {
-                    Label("\(Format.pct(context.threshold)) threshold", systemImage: "line.diagonal")
-                    if context.snapshot.autoswitch != nil { Label("switch", systemImage: "circle") }
+                // The words go before the key wraps.
+                ViewThatFits(in: .horizontal) {
+                    key(threshold: "\(Format.pct(context.threshold)) threshold", switchText: "switch")
+                    key(threshold: Format.pct(context.threshold), switchText: nil)
                 }
-                .font(.system(size: 9))
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
             }
             if Trend.hasData(context.snapshot, now: context.now) {
@@ -290,19 +263,34 @@ struct TrendPanel: View {
                     Spacer()
                     Text(span.axisLabels[2])
                 }
-                .font(.system(size: 8.5))
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 legend
             } else {
                 Spacer(minLength: 0)
                 Label("Trend available when the backend is running", systemImage: "chart.xyaxis.line")
-                    .font(.system(size: 10.5))
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
                 Spacer(minLength: 0)
             }
         }
         .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    private func key(threshold: String, switchText: String?) -> some View {
+        HStack(spacing: 8) {
+            Label(threshold, systemImage: "line.diagonal")
+            if context.snapshot.autoswitch != nil {
+                if let switchText {
+                    Label(switchText, systemImage: "circle")
+                } else {
+                    Image(systemName: "circle").accessibilityLabel("switch")
+                }
+            }
+        }
+        .lineLimit(1)
+        .fixedSize()
     }
 
     private struct Line {
@@ -374,7 +362,7 @@ struct TrendPanel: View {
                         .fontWeight(isEmphasized(line.account) ? .semibold : .regular)
                         .lineLimit(1)
                     if let pct = line.account.usage?.fiveHour?.pct {
-                        Text(Format.pct(pct)).foregroundStyle(.secondary).monospacedDigit()
+                        Text(Format.pct(pct)).fontWeight(.semibold).monospacedDigit()
                     }
                 }
                 .fixedSize()
@@ -383,6 +371,6 @@ struct TrendPanel: View {
                 Text("+\(hidden)").foregroundStyle(.secondary).fixedSize()
             }
         }
-        .font(.system(size: 9.5))
+        .font(.system(size: 11))
     }
 }

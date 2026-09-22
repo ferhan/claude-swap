@@ -156,8 +156,8 @@ same decisions written twice. They move together or the extension gets `EPERM`.
 
 ## Auto-switch toggle
 
-Large and extra-large put a native `Toggle(isOn:intent:)` on the auto-switch
-line, bound to the snapshot's `autoswitch.enabled`. Tapping it runs
+Large and extra-large put a native, regular-size `Toggle(isOn:intent:)`
+labeled "Auto-switch" with a symbol on the auto-switch line, bound to the snapshot's `autoswitch.enabled`. Tapping it runs
 `SetAutoswitchIntent` in the extension, which writes
 `~/.claude-swap-backup/widget-requests/autoswitch-<epochMillis>.json`
 (as `.autoswitch-<epochMillis>.tmp`, then renamed; mode 0600):
@@ -281,9 +281,10 @@ the header says "Backend not running · updated 13m ago" instead of the time
 account.
 
 Extra-large is master-detail with no pager. The left column lists the
-accounts, five per window; each row is a button that selects it (default: the
-active account) and shows 5h and weekly usage with their resets (the 5h one
-ticking, the weekly one as `3d 11h`). When the list overflows, ▲/▼ move it a
+accounts, four per window; each row is a two-line button that selects it
+(default: the active account): name and subtitle on the left, and each
+window's percent over its reset on the right (the 5h one ticking, the weekly
+one as `3d 11h`). When the list overflows, ▲/▼ move it a
 window at a time -- widgets cannot scroll. The right column shows the selected account's weekly pace, its details
 and windows, and the 5h trend with its line emphasized. A tap that misses every
 control reloads the widget rather than opening the stub host app.
@@ -292,6 +293,12 @@ The trend's time axis spans the history actually held: from the oldest sample
 or auto-switch (at most 24h back) to now, never narrower than an hour, with
 the caption and axis hints following it (`last 40m`, `last 6h`, `last 24h`).
 Switches older than 24h are not drawn.
+
+Large and extra-large use a legible type scale (the `largeType` environment
+flag): nothing under 11pt, percents and countdowns 13-14pt in the primary
+color, `.secondary` only for field labels and subtitles. Under System
+appearance the container background is the window background at 88% opacity:
+a lighter fill let Liquid Glass wash the text out on a light desktop.
 
 The `autoswitch` block and 5h `history` are additive and optional: without them
 the threshold defaults to 90%, next-up is omitted and the extra-large trend

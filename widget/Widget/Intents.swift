@@ -26,7 +26,7 @@ struct CswapConfigIntent: WidgetConfigurationIntent {
 /// ‹ / › on the widget. Runs in the extension process, which owns the page
 /// state, then asks WidgetKit to redraw.
 struct PageIntent: AppIntent {
-    static let title: LocalizedStringResource = "Change cswap widget page"
+    static let title: LocalizedStringResource = "Change ClaudeSwap widget page"
     static let isDiscoverable = false
 
     @Parameter(title: "Family")

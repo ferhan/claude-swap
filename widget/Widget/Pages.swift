@@ -15,6 +15,7 @@ struct CswapWidgetView: View {
         }
         .padding(family == .small ? 12 : 13)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .environment(\.largeType, family == .large || family == .extraLarge)
     }
 
     private var family: LayoutFamily { LayoutFamily(widgetFamily) }
@@ -67,7 +68,7 @@ struct PageContext {
 struct EmptyState: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Label("cswap", systemImage: "arrow.left.arrow.right").font(.headline)
+            Label("ClaudeSwap", systemImage: "arrow.left.arrow.right").font(.headline)
             Text("No snapshot yet. Start cswap to publish usage.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -166,10 +167,11 @@ struct HeroWeekly: View {
 /// An account with no usage to draw: API key, expired token, unavailable.
 struct NoUsage: View {
     let account: Account
+    @Environment(\.largeType) private var largeType
 
     var body: some View {
         Label(account.statusText, systemImage: account.kind == "api_key" ? "key" : "slash.circle")
-            .font(.system(size: 10.5))
+            .font(.system(size: largeType ? 12 : 10.5))
             .foregroundStyle(.secondary)
             .lineLimit(2)
     }

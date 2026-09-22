@@ -7,6 +7,7 @@ import WidgetKit
 
 struct DetailHeader: View {
     let account: Account
+    @Environment(\.largeType) private var largeType
 
     var body: some View {
         HStack(spacing: 7) {
@@ -17,7 +18,7 @@ struct DetailHeader: View {
                     if account.active { ActiveMarker(showsText: false) }
                     Text(account.active ? "active · \(account.statusText)" : account.statusText)
                 }
-                .font(.system(size: 9))
+                .font(.system(size: largeType ? 11 : 9))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             }
@@ -102,15 +103,15 @@ struct LargeDetail: View {
                             + Format.age(seconds: context.now.timeIntervalSince(fetched)))
                 }
             }
-            .font(.system(size: 10.5))
+            .font(.system(size: 12))
             Text("USAGE WINDOWS")
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
             DetailWindows(account: account, context: context, limit: .max, titleWidth: 44)
             if let spend = account.usage?.spend {
                 Text("Spend \(spend.used.formatted(.currency(code: spend.currency))) / "
                      + spend.limit.formatted(.currency(code: spend.currency)))
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
         }

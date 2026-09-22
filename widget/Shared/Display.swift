@@ -225,7 +225,7 @@ enum Paging {
     /// Compact rows beside the medium hero.
     static let mediumRowsPerPage = 3
     /// Large/extra-large card budget, in bar-row units (see `cardWeight`).
-    static let largeBudget = 17.0
+    static let largeBudget = 13.0
 
     /// Overview first (or one hero per account on small), then one detail
     /// page per account, so ‹ › reaches everything.
@@ -277,9 +277,10 @@ enum Paging {
     }
 
     /// A card's height in bar rows: header plus spacing, then one per window
-    /// and one for the ahead-of-pace note.
+    /// (or the status line, when there are none) and one for the
+    /// ahead-of-pace note.
     static func cardWeight(_ account: Account) -> Double {
-        let rows = account.windows(maxScoped: Display.maxScopedRows).count
+        let rows = max(account.windows(maxScoped: Display.maxScopedRows).count, 1)
         let paceNote = account.usage?.sevenDay?.aheadOfPace == true ? 1 : 0
         return 2.2 + Double(rows + paceNote)
     }

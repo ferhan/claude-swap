@@ -1,6 +1,14 @@
 import SwiftUI
 import WidgetKit
 
+// MARK: - Type scale
+
+extension EnvironmentValues {
+    /// Large and extra-large: the legible type scale -- nothing under 11pt,
+    /// numbers in the primary color.
+    @Entry var largeType = false
+}
+
 // MARK: - Colors and glyphs
 
 extension Tone {
@@ -204,11 +212,13 @@ struct InitialsBadge: View {
     let account: Account
     var size: CGFloat = 20
     @Environment(\.widgetRenderingMode) private var mode
+    @Environment(\.largeType) private var largeType
 
     var body: some View {
         let accent = account.active && mode == .fullColor
+        let scaled = size * (account.initials.count > 1 ? 0.42 : 0.5)
         Text(account.initials)
-            .font(.system(size: size * (account.initials.count > 1 ? 0.42 : 0.5), weight: .bold))
+            .font(.system(size: largeType ? max(scaled, 11) : scaled, weight: .bold))
             .foregroundStyle(accent ? Color.accentColor : .secondary)
             .frame(width: size, height: size)
             .background(Circle().fill(accent ? Color.accentColor.opacity(0.2) : Color.primary.opacity(0.1)))
@@ -231,13 +241,14 @@ struct AccountTitle: View {
 struct ActiveMarker: View {
     var showsText = true
     @Environment(\.widgetRenderingMode) private var mode
+    @Environment(\.largeType) private var largeType
 
     var body: some View {
         HStack(spacing: 4) {
             Circle().fill(mode == .fullColor ? Color.green : .primary).frame(width: 6, height: 6)
             if showsText { Text("Active") }
         }
-        .font(.system(size: 10, weight: .semibold))
+        .font(.system(size: largeType ? 11 : 10, weight: .semibold))
         .widgetAccentable()
         .accessibilityLabel("Active account")
     }
@@ -245,11 +256,12 @@ struct ActiveMarker: View {
 
 struct Tag: View {
     let text: String
+    @Environment(\.largeType) private var largeType
 
     var body: some View {
         Text(text.uppercased())
-            .font(.system(size: 8.5, weight: .bold))
-            .padding(.horizontal, 4)
+            .font(.system(size: largeType ? 11 : 8.5, weight: .bold))
+            .padding(.horizontal, largeType ? 5 : 4)
             .padding(.vertical, 1)
             .overlay(RoundedRectangle(cornerRadius: 4).stroke(.secondary, lineWidth: 1))
             .foregroundStyle(.secondary)
@@ -259,11 +271,12 @@ struct Tag: View {
 
 struct AgeLabel: View {
     let seconds: Double
+    @Environment(\.largeType) private var largeType
 
     var body: some View {
         Label(Format.age(seconds: seconds), systemImage: "clock")
             .labelStyle(.titleAndIcon)
-            .font(.system(size: 9.5))
+            .font(.system(size: largeType ? 11 : 9.5))
             .foregroundStyle(.secondary)
             .lineLimit(1)
             .fixedSize()
@@ -283,22 +296,41 @@ struct WindowRow: View {
     var titleWidth: CGFloat = 36
     /// Small widget: tighter columns so the bar keeps some length.
     var compact = false
+    @Environment(\.largeType) private var largeType
 
     var body: some View {
-        HStack(spacing: compact ? 4 : 6) {
-            Text(title)
-                .font(.system(size: compact ? 9.5 : 10, weight: .medium))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .frame(width: titleWidth, alignment: .leading)
-            UsageBar(pct: window.pct, threshold: threshold, dimmed: dimmed)
-            PctText(pct: window.pct, threshold: threshold,
-                    font: .system(size: compact ? 9.5 : 10.5, weight: .semibold))
-                .frame(width: compact ? 38 : 44, alignment: .trailing)
-            Countdown(resetsAt: window.resetsAt, now: now, ticking: ticking)
-                .font(.system(size: compact ? 9 : 10).monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: compact ? 42 : 50, alignment: .trailing)
+        if largeType {
+            // Numbers 13pt, in the primary color; the title is the only label.
+            HStack(spacing: compact ? 5 : 6) {
+                Text(title)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(width: titleWidth, alignment: .leading)
+                UsageBar(pct: window.pct, threshold: threshold, dimmed: dimmed)
+                PctText(pct: window.pct, threshold: threshold, font: .system(size: 13, weight: .semibold))
+                    .frame(width: 50, alignment: .trailing)
+                Countdown(resetsAt: window.resetsAt, now: now, ticking: ticking)
+                    .font(.system(size: 13, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.primary)
+                    .frame(width: compact ? 62 : 66, alignment: .trailing)
+            }
+        } else {
+            HStack(spacing: compact ? 4 : 6) {
+                Text(title)
+                    .font(.system(size: compact ? 9.5 : 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(width: titleWidth, alignment: .leading)
+                UsageBar(pct: window.pct, threshold: threshold, dimmed: dimmed)
+                PctText(pct: window.pct, threshold: threshold,
+                        font: .system(size: compact ? 9.5 : 10.5, weight: .semibold))
+                    .frame(width: compact ? 38 : 44, alignment: .trailing)
+                Countdown(resetsAt: window.resetsAt, now: now, ticking: ticking)
+                    .font(.system(size: compact ? 9 : 10).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: compact ? 42 : 50, alignment: .trailing)
+            }
         }
     }
 }
@@ -328,12 +360,13 @@ struct Countdown: View {
 struct Pager: View {
     let family: LayoutFamily
     let label: String
+    @Environment(\.largeType) private var largeType
 
     var body: some View {
         HStack(spacing: 5) {
             button(step: -1, symbol: "chevron.left", name: "Previous page")
             Text(label)
-                .font(.system(size: 9.5, weight: .semibold))
+                .font(.system(size: largeType ? 11 : 9.5, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -345,8 +378,8 @@ struct Pager: View {
     private func button(step: Int, symbol: String, name: String) -> some View {
         Button(intent: PageIntent(family: family, step: step)) {
             Image(systemName: symbol)
-                .font(.system(size: 9, weight: .bold))
-                .frame(width: 20, height: 20)
+                .font(.system(size: largeType ? 11 : 9, weight: .bold))
+                .frame(width: largeType ? 24 : 20, height: largeType ? 24 : 20)
                 .background(Circle().fill(.primary.opacity(0.1)))
                 .contentShape(Circle())
         }
