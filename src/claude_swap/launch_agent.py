@@ -143,8 +143,12 @@ def trim_log(path: Path, max_bytes: int = LOG_MAX_BYTES) -> bool:
     :func:`keep_logs_appending`).
     """
     try:
-        if path.stat().st_size <= max_bytes:
-            return False
+        size = path.stat().st_size
+    except OSError:
+        return False  # nothing there yet, or not ours to read
+    if size <= max_bytes:
+        return False
+    try:
         shutil.copyfile(path, Path(f"{path}.1"))
         os.truncate(path, 0)
     except OSError as e:

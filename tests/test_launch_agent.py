@@ -850,8 +850,11 @@ class TestTrimTheBackendLogs:
         launch_agent.trim_log(path, max_bytes=50)
         assert path.read_text() == ""
 
-    def test_a_missing_log_is_not_an_error(self, tmp_path):
+    def test_a_missing_log_is_not_an_error(self, tmp_path, capsys):
+        # launchd creates them on the first write; before that there is
+        # nothing to say about them every five minutes.
         assert launch_agent.trim_log(tmp_path / "gone.log", max_bytes=1) is False
+        assert capsys.readouterr().err == ""
 
     def test_trims_both_of_the_backends_logs(self, tmp_path):
         out, err = launch_agent.log_paths(launch_agent.AUTO_LABEL, tmp_path)
