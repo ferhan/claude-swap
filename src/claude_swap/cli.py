@@ -830,8 +830,11 @@ Defaults live in settings.json in the backup root; flags override them.
 
         backend_done = threading.Event()
         if args.backend:
-            from claude_swap import widget_requests
+            from claude_swap import launch_agent, widget_requests
 
+            # This process IS the backend: whatever the last one announced on
+            # its way out is answered.
+            launch_agent.clear_retiring_flag(switcher.backup_dir)
             threading.Thread(
                 target=_retire_when_idle,
                 args=(engine, switcher.backup_dir),

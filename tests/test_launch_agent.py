@@ -815,6 +815,66 @@ class TestRetireBackendIfIdle:
         assert launch_agent.plist_path(launch_agent.AUTO_LABEL, tmp_path).exists()
 
 
+class TestARetiringBackendIsNotARunningOne:
+    """Retirement is not instantaneous, so it has to be observable.
+
+    ``idle(retire=True)`` removes the plist, but the process then finishes
+    the tick it is in before exiting. Through that window it is a live pid
+    with matching argv and version, so ``needs_install`` said "running" and a
+    surface opening then was left managed by a process about to leave, with
+    no plist to bring another back.
+    """
+
+    def test_retirement_is_announced_before_the_plist_goes(self, tmp_path):
+        _install_plist(tmp_path, launch_agent.AUTO_LABEL, [*PROGRAM, "auto"])
+        assert launch_agent.retire_backend_if_idle(
+            tmp_path,
+            home=tmp_path,
+            widgets=TestRetireBackendIfIdle._no_widgets(tmp_path),
+        ) is True
+        assert launch_agent.retiring_flag(tmp_path).exists()
+
+    def test_a_surface_reinstalls_over_a_retiring_backend(self, tmp_path):
+        launch_agent.retiring_flag(tmp_path).write_text("4242\n")
+        with patch.object(
+            launch_agent, "needs_install", return_value=False
+        ), patch.object(launch_agent, "install") as install:
+            registration, managed, error = launch_agent.open_surface(tmp_path, "tui")
+        try:
+            assert (managed, error) == (True, None)
+            install.assert_called_once()
+            assert install.call_args.kwargs["label"] == launch_agent.AUTO_LABEL
+            # Answered, so the next surface does not boot a healthy backend.
+            assert not launch_agent.retiring_flag(tmp_path).exists()
+        finally:
+            registration.release()
+
+    def test_a_running_backend_is_left_alone(self, tmp_path):
+        with patch.object(
+            launch_agent, "needs_install", return_value=False
+        ), patch.object(launch_agent, "install") as install:
+            registration, managed, _ = launch_agent.open_surface(tmp_path, "tui")
+        try:
+            assert managed is True
+            install.assert_not_called()
+        finally:
+            registration.release()
+
+    def test_a_failed_reinstall_leaves_the_announcement_standing(self, tmp_path):
+        launch_agent.retiring_flag(tmp_path).write_text("4242\n")
+        with patch.object(
+            launch_agent, "needs_install", return_value=False
+        ), patch.object(
+            launch_agent, "install", side_effect=ClaudeSwitchError("launchctl said no")
+        ):
+            registration, managed, error = launch_agent.open_surface(tmp_path, "tui")
+        try:
+            assert managed is False and "launchctl said no" in error
+            assert launch_agent.retiring_flag(tmp_path).exists()
+        finally:
+            registration.release()
+
+
 class TestWhereTheHostAppIs:
     """The probe looks in every place the app is normally installed.
 

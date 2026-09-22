@@ -439,6 +439,26 @@ def set_open_at_login(enabled: bool, home: Path | None = None) -> None:
 # picture the other is halfway through changing.
 
 
+# A retiring backend has already removed its plist but is still finishing the
+# tick it is in — seconds to tens of seconds during which it is a live pid
+# with matching argv and version, i.e. indistinguishable from a healthy one.
+# It says so here instead, under the lifecycle lock, so `open_surface` can
+# tell the difference (see there). Lives in the backup dir, beside the surface
+# locks and the engine lock, because that is the directory every surface and
+# the backend already agree on.
+RETIRING_FILENAME = ".backend-retiring"
+
+
+def retiring_flag(backup_dir: Path) -> Path:
+    """Where the backend announces that it is on its way out."""
+    return Path(backup_dir) / RETIRING_FILENAME
+
+
+def clear_retiring_flag(backup_dir: Path) -> None:
+    """Drop a stale announcement; the backend calls this as it starts."""
+    retiring_flag(backup_dir).unlink(missing_ok=True)
+
+
 def needs_install(
     label: str,
     args: Sequence[str],
@@ -505,10 +525,24 @@ def open_surface(backup_dir: Path, kind: str | None, home: Path | None = None):
         registration = (
             locking.register_surface(backup_dir, kind) if kind is not None else None
         )
+        retiring = retiring_flag(backup_dir)
         try:
-            ensure_running(AUTO_LABEL, BACKEND_ARGS, home)
+            if retiring.exists():
+                # A backend that announced its retirement is not a running
+                # one, however healthy it looks: its plist is already gone
+                # and it exits as soon as it finishes the tick it is in.
+                # `needs_install` would see a live pid with matching argv and
+                # this surface would end up managed by a process about to
+                # leave, with nothing on disk to bring another back. Install
+                # unconditionally instead — the bootout ends the old one.
+                install(label=AUTO_LABEL, home=home, args=BACKEND_ARGS)
+            else:
+                ensure_running(AUTO_LABEL, BACKEND_ARGS, home)
         except (ClaudeSwitchError, OSError) as e:
             return registration, False, str(e)
+        # Cleared only once a backend is really back, and only under the
+        # lifecycle lock, so no retirement can be announced in between.
+        retiring.unlink(missing_ok=True)
         return registration, True, None
     finally:
         lifecycle.release()
@@ -662,6 +696,12 @@ def retire_backend_if_idle(
     A lifecycle decision already in flight means a surface is opening: skip
     this round rather than wait on it.
 
+    Retirement is also announced on disk (``retiring_flag``) before the plist
+    goes, under the same lock, because the process does not exit here: it
+    finishes the tick it is in first, and for those seconds it is a live pid
+    with matching argv that ``needs_install`` would happily accept. A surface
+    opening in that window reads the flag and reinstalls instead.
+
     A placed widget also keeps it (see :class:`PlacedWidgets`), and "no
     widget placed" counts only once confirmed across checks at least
     ``_PLACED_WIDGETS_CONFIRM_S`` apart. The plist then stays too, so
@@ -681,6 +721,14 @@ def retire_backend_if_idle(
             if locking.live_surfaces(backup_dir):
                 return False
             if retire:
+                # Announce first: the caller only stops the engine after this
+                # returns, and a surface opening in between must not be told
+                # the still-running process is its backend. If the write
+                # fails we raise instead of retiring — the plist stays and
+                # the next check tries again.
+                retiring_flag(backup_dir).write_text(
+                    f"{os.getpid()}\n", encoding="utf-8"
+                )
                 plist_path(AUTO_LABEL, home).unlink(missing_ok=True)
             return True
         finally:
