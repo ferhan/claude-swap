@@ -826,12 +826,24 @@ Defaults live in settings.json in the backup root; flags override them.
 
         # Loop mode: SIGTERM (systemd stop) exits the loop cleanly.
         signal.signal(signal.SIGTERM, lambda *_: engine.stop())
+        import threading
+
+        backend_done = threading.Event()
         if args.backend:
-            import threading
+            from claude_swap import widget_requests
 
             threading.Thread(
                 target=_retire_when_idle,
                 args=(engine, switcher.backup_dir),
+                daemon=True,
+            ).start()
+            # Requests that waited while no backend ran land before the
+            # first tick, so its snapshot already carries them.
+            widget_requests.ensure_requests_dir(switcher.backup_dir)
+            _apply_widget_requests(engine, switcher.backup_dir)
+            threading.Thread(
+                target=_watch_widget_requests,
+                args=(engine, switcher.backup_dir, backend_done),
                 daemon=True,
             ).start()
         if not args.json:
@@ -846,7 +858,10 @@ Defaults live in settings.json in the backup root; flags override them.
                     " — Ctrl-C to stop"
                 )
             )
-        code = engine.run_loop()
+        try:
+            code = engine.run_loop()
+        finally:
+            backend_done.set()
         if code and args.backend:
             # run_loop's only non-zero is "another engine holds the lock" —
             # almost always a hand-run `cswap auto`. Exit 0: under KeepAlive
@@ -905,6 +920,30 @@ def _retire_when_idle(engine, backup_dir: Path) -> None:
         except Exception:
             pass  # a failed check keeps the backend up; the next one retries
         _time.sleep(_RETIRE_CHECK_SECONDS)
+
+
+# The widget's auto-switch toggle drops request files (see widget_requests).
+# Polled on its own 1s timer: the engine can sleep for minutes or hours, and
+# the widget shows the new state optimistically until the snapshot agrees.
+_WIDGET_REQUEST_POLL_SECONDS = 1.0
+
+
+def _apply_widget_requests(engine, backup_dir: Path) -> None:
+    """Apply pending widget requests; tick now if the setting changed, so
+    the snapshot republishes with it (the tick re-reads settings.json)."""
+    from claude_swap import widget_requests
+
+    try:
+        if widget_requests.apply_pending(backup_dir):
+            engine.wake()
+    except Exception as e:  # a bad file or a full disk must not end the watch
+        print(f"widget: could not apply request: {e}", file=sys.stderr, flush=True)
+
+
+def _watch_widget_requests(engine, backup_dir: Path, done) -> None:
+    """Poll the drop directory until the backend's loop has returned."""
+    while not done.wait(_WIDGET_REQUEST_POLL_SECONDS):
+        _apply_widget_requests(engine, backup_dir)
 
 
 def _config_command(argv: list[str]) -> None:

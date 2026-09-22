@@ -1021,6 +1021,9 @@ class TestAutoCommand:
         def stop(self):
             pass
 
+        def wake(self):
+            self.woken = getattr(self, "woken", 0) + 1
+
     @pytest.fixture(autouse=True)
     def _fresh_fake(self):
         self.FakeEngine.instances = []
@@ -1095,6 +1098,71 @@ class TestAutoCommand:
         )
         cli._retire_when_idle(_Engine(), Path("/unused"))
         assert stopped == [True]
+
+    def test_the_backend_applies_waiting_widget_requests_before_its_loop(self, temp_home):
+        """A toggle made while no backend ran lands on start, newest wins."""
+        from claude_swap import widget_requests
+        from claude_swap.paths import get_backup_root
+        from claude_swap.settings import load_settings
+
+        backup = get_backup_root()
+        folder = widget_requests.ensure_requests_dir(backup)
+        for millis, enabled in ((1000, False), (2000, True)):
+            (folder / f"autoswitch-{millis}.json").write_text(
+                json.dumps({"autoswitch": {"enabled": enabled}, "at": "x"})
+            )
+        with patch.object(cli, "_retire_when_idle", lambda *a: None):
+            assert self._run(["--json", "--backend"], temp_home) == 0
+        assert load_settings(backup).enabled is True
+        assert list(folder.iterdir()) == []
+
+    def test_the_backend_creates_the_request_directory(self, temp_home):
+        from claude_swap.paths import get_backup_root
+
+        with patch.object(cli, "_retire_when_idle", lambda *a: None):
+            self._run(["--json", "--backend"], temp_home)
+            folder = get_backup_root() / "widget-requests"
+            assert folder.is_dir() and (folder.stat().st_mode & 0o777) == 0o700
+            # A hand-run loop is not the backend and does not watch.
+            import shutil
+
+            shutil.rmtree(folder)
+            self._run([], temp_home)
+            assert not folder.exists()
+
+    def test_a_widget_request_wakes_the_engine_to_republish(self, monkeypatch, tmp_path):
+        """The tick re-reads settings.json and publishes the snapshot."""
+        import threading
+
+        calls = iter([True, False, True])
+
+        class _Engine:
+            woken = 0
+
+            def wake(self):
+                _Engine.woken += 1
+
+        done = threading.Event()
+
+        def apply(_dir):
+            answer = next(calls, None)
+            if answer is None:
+                done.set()
+                return False
+            return answer
+
+        monkeypatch.setattr(cli, "_WIDGET_REQUEST_POLL_SECONDS", 0)
+        monkeypatch.setattr("claude_swap.widget_requests.apply_pending", apply)
+        cli._watch_widget_requests(_Engine(), tmp_path, done)
+        assert _Engine.woken == 2
+
+    def test_a_failing_request_does_not_end_the_watch(self, monkeypatch, tmp_path, capsys):
+        def boom(_dir):
+            raise OSError("disk full")
+
+        monkeypatch.setattr("claude_swap.widget_requests.apply_pending", boom)
+        cli._apply_widget_requests(object(), tmp_path)
+        assert "could not apply request: disk full" in capsys.readouterr().err
 
     def test_flags_override_settings_json(self, temp_home):
         from claude_swap.paths import get_backup_root
