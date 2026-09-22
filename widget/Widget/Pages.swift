@@ -15,6 +15,17 @@ struct CswapWidgetView: View {
         }
         .padding(family == .small ? 12 : 13)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        // Behind everything, across the whole widget rect -- content margins
+        // are disabled, so this covers the padding ring too. Without it a tap
+        // that misses every control launches the stub host app, whose only
+        // window says it is a stub. Real controls sit in front and win the tap.
+        .background {
+            Button(intent: RefreshIntent()) {
+                Color.clear.contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHidden(true)
+        }
         .environment(\.largeType, family == .large || family == .extraLarge)
     }
 

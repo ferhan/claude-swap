@@ -37,14 +37,6 @@ struct ExtraLargePage: View {
                 TrendPanel(context: context, emphasized: selected?.number)
             }
         }
-        .background {
-            // Taps that miss every control reload instead of opening the host.
-            Button(intent: RefreshIntent()) {
-                Color.clear.contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityHidden(true)
-        }
     }
 }
 
@@ -145,17 +137,27 @@ struct SelectableRow: View {
     }
 
     /// `work — dev@example.com`, then the markers and the selection chevron.
-    /// The name is cut from the tail only once the tags have had their say.
+    /// The age label goes before the name is cut, and the name is cut from
+    /// the tail -- never through the middle, which hid which account it was.
     private func nameLine(accent: Color) -> some View {
+        ViewThatFits(in: .horizontal) {
+            line(accent: accent, showsAge: true, fixedName: true)
+            line(accent: accent, showsAge: false, fixedName: true)
+            line(accent: accent, showsAge: false, fixedName: false)
+        }
+    }
+
+    private func line(accent: Color, showsAge: Bool, fixedName: Bool) -> some View {
         HStack(spacing: 6) {
             Text(account.fullName)
                 .font(.system(size: 12.5, weight: .semibold))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.tail)
+                .fixedSize(horizontal: fixedName, vertical: false)
             if account.active { ActiveMarker(showsText: false) }
             Spacer(minLength: 4)
-            tags
+            tags(showsAge: showsAge)
             Image(systemName: "chevron.right")
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(isSelected ? accent : .clear)
@@ -163,8 +165,8 @@ struct SelectableRow: View {
         }
     }
 
-    @ViewBuilder private var tags: some View {
-        if account.isStale, let age = account.usageAgeSeconds { AgeLabel(seconds: age) }
+    @ViewBuilder private func tags(showsAge: Bool) -> some View {
+        if showsAge, account.isStale, let age = account.usageAgeSeconds { AgeLabel(seconds: age) }
         if context.isNext(account) { Tag(text: "Next") }
         if account.isDisabled { Tag(text: "Off") }
     }
@@ -191,26 +193,27 @@ struct SelectedDetail: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
             Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 2) {
-                // Email and status get the full width: both run long, and
-                // both are cheap to misread when cut.
+                // Email, org and status get the full width and wrap: all
+                // three run long, and half a column cut them mid-word.
                 GridRow {
                     key("Email"); value(account.email).gridCellColumns(3)
                 }
                 GridRow {
-                    key("Alias"); value(account.alias ?? "—")
-                    key("Org"); value(account.organizationName.isEmpty ? "personal" : account.organizationName)
+                    key("Org")
+                    value(account.organizationName.isEmpty ? "personal" : account.organizationName)
+                        .gridCellColumns(3)
                 }
                 GridRow {
+                    key("Alias"); value(account.alias ?? "—")
                     key("Kind"); value(account.kind)
-                    key("Updated")
-                    value(account.usageFetchedAt.map {
-                        Format.age(seconds: context.now.timeIntervalSince($0))
-                    } ?? "—")
                 }
                 GridRow {
                     key("Status")
                     value(account.active ? "active · \(account.statusText)" : account.statusText)
-                        .gridCellColumns(3)
+                    key("Updated")
+                    value(account.usageFetchedAt.map {
+                        Format.age(seconds: context.now.timeIntervalSince($0))
+                    } ?? "—")
                 }
             }
             .font(.system(size: 11.5))
@@ -226,8 +229,14 @@ struct SelectedDetail: View {
         Text(text).foregroundStyle(.secondary).lineLimit(1).fixedSize()
     }
 
+    /// Wraps to a second line rather than cutting: at this width a middle
+    /// truncation turned a long org name into `ferhane...ganization`.
     private func value(_ text: String) -> some View {
-        Text(text).foregroundStyle(.primary).lineLimit(1).truncationMode(.middle)
+        Text(text)
+            .foregroundStyle(.primary)
+            .lineLimit(2)
+            .truncationMode(.tail)
+            .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

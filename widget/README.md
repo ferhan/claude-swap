@@ -313,9 +313,14 @@ overflows, ▲/▼ move it a window at a time -- widgets cannot scroll.
 The right column does not repeat any of that. It shows the selected account's
 details, the weekly figures the rows do not carry (pace against expectation,
 when the week runs out, spend), the per-model weekly limits -- the one place
-Opus/Sonnet/Haiku/Fable appear -- and the 5h trend with its line emphasized. A
-tap that misses every control reloads the widget rather than opening the stub
-host app.
+Opus/Sonnet/Haiku/Fable appear -- and the 5h trend with its line emphasized.
+
+On every size, a tap that misses every control reloads the widget
+(`RefreshIntent`) rather than launching the stub host app. The catcher sits
+behind the whole widget rect -- content margins are disabled, so that includes
+the padding ring -- because there is no `widgetURL` or `Link` anywhere and
+WidgetKit's default for an uncaught tap is to open the container app, whose
+only window says it is a container.
 
 The trend's time axis spans the history actually held: from the oldest sample
 or auto-switch (at most 24h back) to now, never narrower than an hour, with
