@@ -786,3 +786,116 @@ class TestRetireBackendIfIdle:
         finally:
             busy.release()
         assert launch_agent.plist_path(launch_agent.AUTO_LABEL, tmp_path).exists()
+
+
+class TestPlacedWidgetsKeepTheBackend:
+    """A widget on the desktop is a viewer the surface locks cannot see."""
+
+    def _app(self, home: Path) -> Path:
+        exe = launch_agent.widget_host_executable(home)
+        exe.parent.mkdir(parents=True)
+        exe.write_text("#!/bin/sh\n")
+        return exe
+
+    def _probe(self, answers, clock=lambda: 0.0):
+        """A PlacedWidgets whose host app answers from ``answers`` in turn."""
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            answer = next(answers)
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+        return launch_agent.PlacedWidgets(clock=clock), run, calls
+
+    def _done(self, stdout: str, returncode: int = 0):
+        return subprocess.CompletedProcess([], returncode, stdout=stdout, stderr="")
+
+    def test_a_placed_widget_keeps_the_backend_and_its_plist(self, tmp_path):
+        _install_plist(tmp_path, launch_agent.AUTO_LABEL, [*PROGRAM, "auto"])
+        exe = self._app(tmp_path)
+        widgets, run, calls = self._probe(iter([self._done('{"count": 2}\n')]))
+        with patch.object(launch_agent.subprocess, "run", run):
+            assert launch_agent.retire_backend_if_idle(
+                tmp_path, home=tmp_path, widgets=widgets
+            ) is False
+        assert calls == [[str(exe), "--placed-widgets"]]
+        # The plist stays, so RunAtLoad brings it back at login for the widget.
+        assert launch_agent.plist_path(launch_agent.AUTO_LABEL, tmp_path).exists()
+
+    def test_no_placed_widget_retires(self, tmp_path):
+        _install_plist(tmp_path, launch_agent.AUTO_LABEL, [*PROGRAM, "auto"])
+        self._app(tmp_path)
+        widgets, run, _ = self._probe(iter([self._done('{"count": 0}')]))
+        with patch.object(launch_agent.subprocess, "run", run):
+            assert launch_agent.retire_backend_if_idle(
+                tmp_path, home=tmp_path, widgets=widgets
+            ) is True
+        assert not launch_agent.plist_path(launch_agent.AUTO_LABEL, tmp_path).exists()
+
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            subprocess.CompletedProcess([], 1, stdout='{"count": 3}', stderr=""),
+            subprocess.CompletedProcess([], 0, stdout="not json", stderr=""),
+            subprocess.CompletedProcess([], 0, stdout='{"count": "3"}', stderr=""),
+            subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+            subprocess.TimeoutExpired(["ClaudeSwap"], 10),
+            OSError("exec format error"),
+        ],
+    )
+    def test_an_unknown_answer_counts_as_none_and_retires(self, tmp_path, answer, capsys):
+        _install_plist(tmp_path, launch_agent.AUTO_LABEL, [*PROGRAM, "auto"])
+        self._app(tmp_path)
+        widgets, run, _ = self._probe(iter([answer]))
+        with patch.object(launch_agent.subprocess, "run", run):
+            assert launch_agent.retire_backend_if_idle(
+                tmp_path, home=tmp_path, widgets=widgets
+            ) is True
+        assert "unknown" in capsys.readouterr().err
+
+    def test_a_missing_app_retires_without_spawning(self, tmp_path, capsys):
+        widgets, run, calls = self._probe(iter([]))
+        with patch.object(launch_agent.subprocess, "run", run):
+            assert widgets.count(tmp_path) == 0
+        assert calls == []
+        assert "no widget host app" in capsys.readouterr().err
+
+    def test_the_answer_is_cached_and_logged_once(self, tmp_path, capsys):
+        self._app(tmp_path)
+        now = [0.0]
+        widgets, run, calls = self._probe(
+            iter([self._done('{"count": 1}'), self._done('{"count": 1}'),
+                  self._done('{"count": 0}')]),
+            clock=lambda: now[0],
+        )
+        with patch.object(launch_agent.subprocess, "run", run):
+            assert widgets.count(tmp_path) == 1
+            now[0] = launch_agent._PLACED_WIDGETS_CACHE_S - 1
+            assert widgets.count(tmp_path) == 1
+            assert len(calls) == 1  # served from the cache
+            now[0] = launch_agent._PLACED_WIDGETS_CACHE_S
+            assert widgets.count(tmp_path) == 1
+            assert len(calls) == 2
+            now[0] = 2 * launch_agent._PLACED_WIDGETS_CACHE_S
+            assert widgets.count(tmp_path) == 0
+        err = capsys.readouterr().err.splitlines()
+        # One line per change of answer, not per query.
+        assert len(err) == 2
+        assert "1 widget(s) placed" in err[0] and "no widgets placed" in err[1]
+
+    def test_an_open_surface_does_not_ask_the_app(self, tmp_path):
+        from claude_swap import locking
+
+        widgets, run, calls = self._probe(iter([]))
+        surface = locking.register_surface(tmp_path, "tui")
+        try:
+            with patch.object(launch_agent.subprocess, "run", run):
+                assert launch_agent.retire_backend_if_idle(
+                    tmp_path, home=tmp_path, widgets=widgets
+                ) is False
+        finally:
+            surface.release()
+        assert calls == []

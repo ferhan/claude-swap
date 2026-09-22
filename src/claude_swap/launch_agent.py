@@ -29,6 +29,7 @@ functions refuse rather than half-work elsewhere.
 
 from __future__ import annotations
 
+import json
 import os
 import plistlib
 import shutil
@@ -513,7 +514,85 @@ def open_surface(backup_dir: Path, kind: str | None, home: Path | None = None):
         lifecycle.release()
 
 
-def retire_backend_if_idle(backup_dir: Path, home: Path | None = None) -> bool:
+# -- placed widgets ------------------------------------------------------------
+#
+# A widget on the desktop is a viewer too, but it cannot hold a surface lock:
+# WidgetKit wakes the extension only to draw. So the backend asks the widget's
+# host app, which alone can call WidgetCenter, how many are placed. The app
+# answers `{"count": N}` on stdout and exits 0; anything else is "unknown".
+
+# Where `cswap widget install` puts the host app. Spelled once.
+WIDGET_HOST_APP = Path("Applications") / "ClaudeSwap.app"
+_PLACED_WIDGETS_TIMEOUT_S = 10.0
+# The retire check runs every 5s; widgets are placed and removed by hand, so
+# a few minutes of lag is fine and saves spawning the app 60 times a minute.
+_PLACED_WIDGETS_CACHE_S = 300.0
+
+
+def widget_host_executable(home: Path | None = None) -> Path:
+    """The host app's binary, which answers ``--placed-widgets``."""
+    return (home or Path.home()) / WIDGET_HOST_APP / "Contents" / "MacOS" / "ClaudeSwap"
+
+
+class PlacedWidgets:
+    """How many cswap widgets are placed, cached for a few minutes.
+
+    Unknown (no app, timeout, bad exit, unparsable output) reads as 0: the
+    backend then retires exactly as it did before widgets counted. Each
+    distinct answer is logged once to stderr (the backend's ``.err`` log),
+    so a missing app is one line, not one every five minutes.
+    """
+
+    def __init__(self, clock=time.monotonic) -> None:
+        self._clock = clock
+        self._cached: tuple[float, int] | None = None
+        self._last_logged: str | None = None
+
+    def count(self, home: Path | None = None) -> int:
+        now = self._clock()
+        if self._cached is not None and now - self._cached[0] < _PLACED_WIDGETS_CACHE_S:
+            return self._cached[1]
+        count, note = self._query(home)
+        self._cached = (now, count)
+        if note != self._last_logged:
+            self._last_logged = note
+            print(f"backend: {note}", file=sys.stderr, flush=True)
+        return count
+
+    @staticmethod
+    def _query(home: Path | None) -> tuple[int, str]:
+        exe = widget_host_executable(home)
+        if not exe.is_file():
+            return 0, f"no widget host app at {exe}; placed widgets count as 0"
+        try:
+            done = subprocess.run(
+                [str(exe), "--placed-widgets"],
+                capture_output=True,
+                text=True,
+                timeout=_PLACED_WIDGETS_TIMEOUT_S,
+                check=False,
+            )
+            if done.returncode != 0:
+                raise ValueError(f"exit {done.returncode}")
+            count = json.loads(done.stdout.strip().splitlines()[-1])["count"]
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                raise ValueError(f"bad count {count!r}")
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError,
+                IndexError, TypeError) as e:
+            return 0, f"placed widgets unknown ({e}); counting 0"
+        if count:
+            return count, f"{count} widget(s) placed; staying up without a surface"
+        return 0, "no widgets placed"
+
+
+_placed_widgets = PlacedWidgets()
+
+
+def retire_backend_if_idle(
+    backup_dir: Path,
+    home: Path | None = None,
+    widgets: PlacedWidgets | None = None,
+) -> bool:
     """The backend's own check: True when no surface is open and it should go.
 
     Removes the backend's plist before answering, so it is not started again
@@ -525,17 +604,32 @@ def retire_backend_if_idle(backup_dir: Path, home: Path | None = None) -> bool:
 
     A lifecycle decision already in flight means a surface is opening: skip
     this round rather than wait on it.
+
+    A placed widget also keeps it (see :class:`PlacedWidgets`). The plist
+    then stays too, so ``RunAtLoad`` brings the backend back at login for
+    the widget. The host app is asked outside the lifecycle lock — it can
+    take seconds, and surfaces opening wait on that lock — and the surfaces
+    are checked again under it before the plist goes.
     """
     from claude_swap import locking
 
     backup_dir = Path(backup_dir)
-    lifecycle = locking.lifecycle_lock(backup_dir, timeout=0.0)
-    if not lifecycle.acquire():
-        return False
-    try:
-        if locking.live_surfaces(backup_dir):
+
+    def idle(retire: bool) -> bool:
+        lifecycle = locking.lifecycle_lock(backup_dir, timeout=0.0)
+        if not lifecycle.acquire():
             return False
-        plist_path(AUTO_LABEL, home).unlink(missing_ok=True)
-        return True
-    finally:
-        lifecycle.release()
+        try:
+            if locking.live_surfaces(backup_dir):
+                return False
+            if retire:
+                plist_path(AUTO_LABEL, home).unlink(missing_ok=True)
+            return True
+        finally:
+            lifecycle.release()
+
+    if not idle(retire=False):
+        return False
+    if (widgets or _placed_widgets).count(home) > 0:
+        return False
+    return idle(retire=True)
