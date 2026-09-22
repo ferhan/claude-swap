@@ -47,6 +47,13 @@ targets:
     platform: macOS
     sources:
       - path: App
+      # For `claudeswap://start-backend`: the snapshot/request paths and the
+      # start marker, from the same files the extension uses, so the two
+      # cannot disagree about where anything lives.
+      - path: Widget/SnapshotFile.swift
+      - path: Shared/Snapshot.swift
+      - path: Shared/BackendStart.swift
+      - path: Shared/RequestDrop.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.cswap.widget
@@ -77,6 +84,16 @@ targets:
         LSApplicationCategoryType: public.app-category.developer-tools
         # Must match the extension's -- see CURRENT_PROJECT_VERSION above.
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # No Dock icon by default: a launch to handle claudeswap://start-backend
+        # runs cswap and quits without showing anything. A plain launch opts
+        # back in (setActivationPolicy(.regular)) while its window is open.
+        LSUIElement: true
+        # The widget's "Start backend" control is a Link to this URL. A widget
+        # cannot run a process and its intents run in the sandboxed extension,
+        # so the host app has to be the one that runs `cswap service start`.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.cswap.widget.start-backend
+            CFBundleURLSchemes: [claudeswap]
     dependencies:
       - target: CswapWidgetExtension
         embed: true

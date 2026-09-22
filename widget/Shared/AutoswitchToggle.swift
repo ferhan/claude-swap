@@ -26,7 +26,7 @@ struct AutoswitchRequest: Encodable, Equatable, Sendable {
         requestedAt = date.formatted(Date.ISO8601FormatStyle())
     }
 
-    static func millis(_ date: Date) -> Int64 { Int64((date.timeIntervalSince1970 * 1_000).rounded(.down)) }
+    static func millis(_ date: Date) -> Int64 { RequestDrop.millis(date) }
     static func fileName(at date: Date) -> String { "autoswitch-\(millis(date)).json" }
     static func tempName(at date: Date) -> String { ".autoswitch-\(millis(date)).tmp" }
 
@@ -36,32 +36,14 @@ struct AutoswitchRequest: Encodable, Equatable, Sendable {
         return try encoder.encode(self)
     }
 
-    enum WriteError: Error, Equatable {
-        /// The backend creates the drop directory; without it nothing would
-        /// read the request.
-        case noDropDirectory
-    }
+    typealias WriteError = RequestDrop.WriteError
 
     /// Writes the request into `directory` atomically and returns its URL.
     /// Never creates the directory: its absence means no backend to apply it.
     @discardableResult
     static func write(enabled: Bool, at date: Date, into directory: URL) throws -> URL {
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory),
-              isDirectory.boolValue else { throw WriteError.noDropDirectory }
-        let temp = directory.appending(path: tempName(at: date))
-        let final = directory.appending(path: fileName(at: date))
-        let data = try AutoswitchRequest(enabled: enabled, at: date).encoded()
-        guard FileManager.default.createFile(atPath: temp.path, contents: data,
-                                             attributes: [.posixPermissions: 0o600]) else {
-            throw CocoaError(.fileWriteUnknown)
-        }
-        guard rename(temp.path, final.path) == 0 else {
-            let code = errno
-            try? FileManager.default.removeItem(at: temp)
-            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
-        }
-        return final
+        try RequestDrop.write(AutoswitchRequest(enabled: enabled, at: date).encoded(),
+                              name: fileName(at: date), into: directory)
     }
 }
 
@@ -75,13 +57,19 @@ struct PendingToggle: Codable, Equatable, Sendable {
     var delivered: Bool
 }
 
-/// How the toggle is drawn right now.
+/// How the toggle is drawn right now. Everything the chip shows -- the dot,
+/// the words, the pending mark -- comes from this one value; nothing reads
+/// the `Toggle`'s own binding, which WidgetKit flips optimistically on tap
+/// and would then disagree with the label.
 struct ToggleResolution: Equatable, Sendable {
     var isOn: Bool
     /// A request is out and the snapshot has not agreed yet.
     var isPending: Bool
     /// Show "backend not running" beside the toggle.
     var backendNotRunning: Bool
+    /// The backend is not republishing: nothing would apply a request, so the
+    /// control is drawn inert. The header's "Start backend" is the way out.
+    var isDisabled = false
 }
 
 enum AutoswitchToggle {
@@ -95,6 +83,13 @@ enum AutoswitchToggle {
     ///     presumed down (see `Snapshot.isBackendStale`).
     static func resolve(snapshotEnabled: Bool, snapshotStale: Bool,
                         pending: PendingToggle?, now: Date) -> ToggleResolution {
+        // A stale snapshot is the end of it: no request would be applied, so
+        // the control is inert and shows what was last published. Saying so
+        // is the header's job ("Backend stopped · Start backend").
+        guard !snapshotStale else {
+            return ToggleResolution(isOn: snapshotEnabled, isPending: false,
+                                    backendNotRunning: false, isDisabled: true)
+        }
         let settled = ToggleResolution(isOn: snapshotEnabled, isPending: false, backendNotRunning: false)
         guard let pending else { return settled }
         let age = now.timeIntervalSince(pending.requestedAt)
@@ -108,8 +103,8 @@ enum AutoswitchToggle {
         if age < pendingTimeout {
             return ToggleResolution(isOn: pending.desired, isPending: true, backendNotRunning: false)
         }
-        // Gave up: the snapshot's value wins, and a stale snapshot is why.
-        return ToggleResolution(isOn: snapshotEnabled, isPending: false, backendNotRunning: snapshotStale)
+        // Gave up: the snapshot's value wins again.
+        return settled
     }
 
     /// When the drawn state next changes without a new snapshot: the moment a

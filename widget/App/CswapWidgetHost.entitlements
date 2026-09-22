@@ -2,10 +2,16 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Plain sandbox, no exceptions: the host is a stub that never reads the
-	     snapshot. Only the extension does, and only it carries the read
-	     exception. -->
-	<key>com.apple.security.app-sandbox</key>
-	<true/>
+	<!-- No app sandbox. The host's one job besides containing the extension
+	     is claudeswap://start-backend: read ~/.claude-swap-backup/snapshot.json
+	     for cswapCommand and exec `cswap service start`. A sandboxed parent
+	     cannot read the snapshot without an exception, and whatever it execs
+	     inherits its sandbox -- cswap could then reach neither its own files
+	     under ~/.claude-swap-backup nor launchctl.
+
+	     The sandbox requirement is pkd's, and it applies to plug-ins only
+	     ("plug-ins must be sandboxed"): the extension keeps its sandbox. A
+	     Developer ID app outside the App Store need not be sandboxed;
+	     hardened runtime (required for notarization) stays on. -->
 </dict>
 </plist>

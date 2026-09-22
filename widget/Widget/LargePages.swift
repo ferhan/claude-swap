@@ -13,7 +13,9 @@ struct LargePage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
-                BrandTitle(context: context)
+                // Stale: first claim on the width. The pager's label
+                // truncates; the stopped cue's shortest form cannot.
+                BrandTitle(context: context).layoutPriority(context.isBackendStale ? 1 : 0)
                 Spacer(minLength: 4)
                 context.pager
             }
@@ -37,7 +39,8 @@ struct LargePage: View {
 }
 
 /// `⇄ ClaudeSwap  as of 10:03`, the first line of large and extra-large. When
-/// the backend has stopped republishing, the time gives way to saying so.
+/// the backend has stopped republishing, the time gives way to saying so and
+/// to a control that starts it.
 struct BrandTitle: View {
     let context: PageContext
 
@@ -49,13 +52,16 @@ struct BrandTitle: View {
                 .widgetAccentable()
             Text("ClaudeSwap").font(.system(size: 14, weight: .bold)).fixedSize()
             if context.isBackendStale {
-                // The wording shortens before the message is cut short.
+                // "Backend stopped" and the control to start it. The wording
+                // shortens, then goes, before the control is cut.
                 let age = context.now.timeIntervalSince(context.snapshot.takenAt)
                 ViewThatFits(in: .horizontal) {
-                    backendDown(Format.backendDown(age: age))
-                    backendDown("Backend not running · \(Format.age(seconds: age))")
-                    backendDown("Backend not running")
-                    backendDown("Not running")
+                    stopped(Format.backendDown(age: age), short: false)
+                    stopped("Backend stopped · \(Format.age(seconds: age))", short: false)
+                    stopped("Backend stopped", short: false)
+                    stopped("Stopped", short: false)
+                    stopped("Stopped", short: true)
+                    stopped(nil, short: true)
                 }
             } else {
                 let time = context.snapshot.takenAt.formatted(date: .omitted, time: .shortened)
@@ -75,13 +81,22 @@ struct BrandTitle: View {
             .fixedSize()
     }
 
-    private func backendDown(_ text: String) -> some View {
-        Label(text, systemImage: "exclamationmark.circle")
-            .labelStyle(.titleAndIcon)
+    /// The words, or with `nil` just the icon, then the Start control.
+    private func stopped(_ text: String?, short: Bool) -> some View {
+        HStack(spacing: 6) {
+            Group {
+                if let text {
+                    Label(text, systemImage: "exclamationmark.circle").labelStyle(.titleAndIcon)
+                } else {
+                    Image(systemName: "exclamationmark.circle").accessibilityLabel("Backend stopped")
+                }
+            }
             .font(.system(size: 11, weight: .medium))
             .foregroundStyle(.secondary)
             .lineLimit(1)
             .fixedSize()
+            StartBackendControl(context: context, short: short)
+        }
     }
 }
 

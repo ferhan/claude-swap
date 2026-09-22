@@ -2,7 +2,7 @@ import SwiftUI
 import WidgetKit
 
 struct Entry: TimelineEntry {
-    let date: Date
+    var date: Date
     let snapshot: Snapshot?
     /// Raw stored page; normalized against the current page list at render.
     let pageIndex: Int
@@ -11,6 +11,10 @@ struct Entry: TimelineEntry {
     /// The last auto-switch toggle request; resolved against the snapshot at
     /// render.
     var pendingToggle: PendingToggle?
+    /// The last switch request; resolved against the snapshot at render.
+    var pendingSwitch: PendingSwitch?
+    /// When the host app last started the backend (its marker file).
+    var backendStartedAt: Date?
     let appearance: AppearanceOption
 }
 
@@ -24,25 +28,32 @@ struct Provider: AppIntentTimelineProvider {
     }
 
     func timeline(for configuration: CswapConfigIntent, in context: Context) async -> Timeline<Entry> {
-        // One entry (two while a toggle request is pending): every ticking thing on screen is a `Text(date:style:)`
-        // driven by an absolute `resetsAt`, so WidgetKit ticks the countdowns
-        // itself. The reload is what picks up a newer snapshot file (and
-        // refreshes the human "3d 11h" countdowns).
+        // One entry, plus one per moment a pending request changes the
+        // drawing on its own (a toggle, switch or start timing out): every
+        // ticking thing on screen is a `Text(date:style:)` driven by an
+        // absolute `resetsAt`, so WidgetKit ticks the countdowns itself. The
+        // reload is what picks up a newer snapshot file (and refreshes the
+        // human "3d 11h" countdowns).
         // 60s matches the backend's own poll interval: asking for less would
         // only re-read a file that cannot have changed. WidgetKit budgets
         // reloads and may serve them less often than requested -- this is the
         // ceiling, not a guarantee.
-        // A toggle request still waiting on the backend changes the drawing
-        // at its timeout, so that moment gets its own entry and a reload.
         let now = Date.now
         let first = entry(configuration, context, at: now)
         let reload = now.addingTimeInterval(60)
-        guard let expiry = AutoswitchToggle.expiry(of: first.pendingToggle, now: now) else {
-            return Timeline(entries: [first], policy: .after(reload))
+        let expiries = Set([
+            AutoswitchToggle.expiry(of: first.pendingToggle, now: now),
+            AccountSwitch.expiry(of: first.pendingSwitch, now: now),
+            BackendStart.expiry(markerAt: first.backendStartedAt, now: now)
+        ].compactMap { $0 }.filter { $0 < reload }).sorted()
+        var entries = [first]
+        for date in expiries {
+            var next = first
+            next.date = date
+            entries.append(next)
         }
-        let second = Entry(date: expiry, snapshot: first.snapshot, pageIndex: first.pageIndex, nav: first.nav,
-                           pendingToggle: first.pendingToggle, appearance: first.appearance)
-        return Timeline(entries: [first, second], policy: .after(min(reload, expiry.addingTimeInterval(1))))
+        let policy = expiries.first.map { min(reload, $0.addingTimeInterval(1)) } ?? reload
+        return Timeline(entries: entries, policy: .after(policy))
     }
 
     private func entry(_ configuration: CswapConfigIntent, _ context: Context, at date: Date = .now) -> Entry {
@@ -52,6 +63,8 @@ struct Provider: AppIntentTimelineProvider {
                      pageIndex: PageStore.index(family),
                      nav: NavStore.state(family),
                      pendingToggle: AutoswitchStore.pending(),
+                     pendingSwitch: SwitchStore.pending(),
+                     backendStartedAt: SnapshotFile.loadBackendStart(),
                      appearance: configuration.appearance)
     }
 }

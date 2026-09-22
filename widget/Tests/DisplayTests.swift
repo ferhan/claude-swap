@@ -337,7 +337,7 @@ extension DisplayTests {
         let snapshot = try golden()
         XCTAssertFalse(snapshot.isBackendStale(now: snapshot.takenAt.addingTimeInterval(180)))
         XCTAssertTrue(snapshot.isBackendStale(now: snapshot.takenAt.addingTimeInterval(181)))
-        XCTAssertEqual(Format.backendDown(age: 13 * 60), "Backend not running · updated 13m ago")
+        XCTAssertEqual(Format.backendDown(age: 13 * 60), "Backend stopped · updated 13m ago")
     }
 
     func testNormalizedWraps() {

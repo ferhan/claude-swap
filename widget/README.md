@@ -7,10 +7,12 @@ It reads the JSON document `cswap snapshot` produces (see
 That schema, and that path, are the entire contract between the Python and the
 Swift, which is why the widget lives in this repo rather than its own.
 
-**This is a display surface, not a second front end.** It cannot switch
-accounts, add or remove them, or change `cswap` state — with one exception,
-the auto-switch toggle, which only *asks*: it drops a request file that the
-backend applies (see "Auto-switch toggle" below). A sandboxed extension cannot
+**This is a display surface, not a second front end.** It cannot add or remove
+accounts or change `cswap` state itself. Its two actions -- the auto-switch
+toggle and "Switch to this account" -- only *ask*: each drops a request file
+that the backend applies (see "Auto-switch toggle" and "Switch to this
+account" below). "Start backend" hands off to the host app (see "Start
+backend"). A sandboxed extension cannot
 write `~/.claude.json` or `settings.json`, reach the Keychain, take the switch
 locks, or exec `cswap`. All of that stays in the CLI, the TUI and the menu bar.
 
@@ -22,8 +24,9 @@ to *its own* container. So an intent can change what the widget **shows**
 not what `cswap` **does** -- except by dropping a request into the one
 directory it may write, for the backend to apply.
 
-The host app here is a stub whose only job is to be the container the widget
-extension ships inside; WidgetKit extensions cannot be installed standalone.
+The host app here is a stub whose job is to be the container the widget
+extension ships inside (WidgetKit extensions cannot be installed standalone),
+and to run `cswap service start` when the widget's Start control asks.
 
 ## Prerequisites
 
@@ -130,7 +133,8 @@ you can confirm with `xcodebuild ... CODE_SIGNING_ALLOWED=NO build`.
 
 ## Entitlements
 
-Both targets are sandboxed. The extension additionally carries two exceptions:
+The extension is sandboxed; the host app is not (see "Start backend" for why).
+The extension additionally carries two exceptions:
 
 ```xml
 <key>com.apple.security.temporary-exception.files.home-relative-path.read-only</key>
@@ -139,8 +143,8 @@ Both targets are sandboxed. The extension additionally carries two exceptions:
 <array><string>/.claude-swap-backup/widget-requests/</string></array>
 ```
 
-The read-write one is the auto-switch toggle's drop directory and nothing
-else; see below.
+The read-write one is the request drop directory (auto-switch toggle, switch
+requests, and reading the host's start marker) and nothing else; see below.
 
 No App Group. The snapshot is written by the user's own `cswap`, installed from
 PyPI — a python3 process, with no code signature and so no entitlement, which
@@ -153,8 +157,8 @@ sandboxed reader with it reads `snapshot.json` and gets `EPERM` on
 `settings.json` sitting next to it. Nothing else in the backup root —
 `credentials/`, `configs/` — is reachable.
 
-Turning the sandbox off instead is not an option. `pkd` refuses to register an
-unsandboxed extension at all:
+Turning the extension's sandbox off instead is not an option. `pkd` refuses to
+register an unsandboxed extension at all:
 
 ```
 pkd: [com.apple.PlugInKit:discovery] rejecting; Ignoring mis-configured
@@ -172,7 +176,16 @@ a custom `ToggleStyle` -- a capsule holding the label, a filled state dot
 (green on, red off) and the state in words (`at 85%` / `Off`). Not
 `.toggleStyle(.switch)`: AppKit's switch is not one of the controls a widget's
 out-of-process renderer can draw, and came out as the yellow "unsupported
-view" placeholder. Tapping it runs
+view" placeholder.
+
+Dot, words and pending mark all come from one resolved value
+(`ToggleResolution`), never from the `Toggle`'s own binding: WidgetKit flips
+that binding optimistically on tap, which showed a green dot beside a label
+still reading "Off" whenever no backend ever confirmed. With the snapshot
+stale the chip is drawn inert and tapping it writes nothing -- the header's
+"Start backend" is the action that matters then.
+
+Tapping it runs
 `SetAutoswitchIntent` in the extension, which writes
 `~/.claude-swap-backup/widget-requests/autoswitch-<epochMillis>.json`
 (as `.autoswitch-<epochMillis>.tmp`, then renamed; mode 0600):
@@ -184,10 +197,79 @@ view" placeholder. Tapping it runs
 The backend creates the directory (0700), applies the newest request to
 `settings.json` and republishes the snapshot. The widget never creates the
 directory: if it is missing or the write fails, the toggle does not flip and
-the line says "backend not running". After a successful write the widget keeps
+the line says "backend not running" (while the snapshot is still fresh; once
+it is stale the header says "Backend stopped" instead). After a successful write the widget keeps
 `{desired, at}` in its own defaults and draws the asked-for state marked
 "applying…" until the snapshot agrees, or for 30s, after which the snapshot's
 value wins again. Logic: `Shared/AutoswitchToggle.swift`.
+
+## Switch to this account
+
+The selected account's detail -- the extra-large right column, the large
+detail page -- carries a "Switch to this account" chip (`Switch` where
+narrow). The active account shows "Active" instead, and an account whose slot
+holds no stored backup (`switchable: false`) shows "Not switchable": the same
+rule `cswap switch N` applies. A disabled slot stays switchable (disabled only
+leaves automatic rotation), and `kind` is not checked.
+
+Tapping it runs `SwitchAccountIntent` in the extension, which writes
+`~/.claude-swap-backup/widget-requests/switch-<epochMillis>.json` (via
+`.switch-<epochMillis>.tmp`, mode 0600):
+
+```json
+{"at": "2026-09-22T05:20:03Z", "switch": {"to": 3}}
+```
+
+The backend applies a request under 60s old through the same path as
+`cswap switch 3` and republishes the snapshot. The widget keeps
+`{target, at, delivered}` in its own defaults and shows "Switching…" until the
+snapshot's `activeAccountNumber` is the target, or for 30s; then "Switch not
+applied" with a Retry chip for 30s more. With the snapshot stale the intent
+does not write at all -- and the chip is not drawn: "Start backend" takes its
+place. Logic: `Shared/AccountSwitch.swift`.
+
+## Start backend
+
+When the snapshot is more than 3 minutes old the header reads "Backend
+stopped" (shortened to an icon where tight) followed by a "Start backend"
+chip (`Start` beside the large pager).
+
+A widget cannot run a process, and an `AppIntent` in a widget runs in the
+sandboxed extension, which cannot exec `cswap`. So the chip is a `Link` to
+`claudeswap://start-backend`, a scheme the host app registers in
+`CFBundleURLTypes`. A `Link` is the documented way for a macOS 14+ widget to
+hand a tap to its app. An intent with `openAppWhenRun` would need the intent
+compiled into the host and runs its `perform` in whichever process the system
+picks; `OpenURLIntent` is macOS 15+. It is the only `Link` in the widget --
+the stray-tap catcher behind everything is still a `RefreshIntent` button, so
+a tap that misses every control still does not open the app.
+
+The host app (`App/HostMain.swift`) is `LSUIElement`, so it never shows a Dock
+icon unless the user opens it directly (then it switches to a regular app for
+as long as its info window is up). On the start URL it:
+
+1. drops `widget-requests/.backend-starting` (`{"at": ...}`; a dotfile, which
+   the backend leaves alone), creating the directory 0700 if it is missing,
+   and reloads the widget, which then shows "Starting…" while the marker is
+   under 30s old and the snapshot still stale;
+2. finds cswap: the snapshot's `cswapCommand` argv prefix, else the first
+   executable of `~/.local/bin/cswap`, `/opt/homebrew/bin/cswap`,
+   `/usr/local/bin/cswap`;
+3. runs `<cswap> service start` (20s timeout; PATH extended with those
+   directories, since a LaunchServices launch gets launchd's bare PATH);
+4. on success waits up to 5s for a snapshot newer than the click, reloads the
+   widget and quits; on failure removes the marker and shows an `NSAlert`
+   with the exit status and the last lines of output, then quits.
+
+An alert rather than a notification: a notification needs permission granted
+beforehand -- the permission prompt would be the first thing the user sees --
+and can be silenced, while a failed start is rare and needs acting on.
+
+The host is unsandboxed for this. A sandboxed parent cannot read the snapshot
+without an exception, and whatever it execs inherits its sandbox, so `cswap`
+could reach neither `~/.claude-swap-backup` nor `launchctl`. pkd's sandbox
+requirement applies to plug-ins only; the host of a Developer ID app outside
+the App Store does not need one, and hardened runtime stays on.
 
 ## Placed-widget query
 
@@ -250,14 +332,17 @@ Archive, export, DMG, notarization and stapling are written but unrun.
 project.yml                              XcodeGen spec — the real project definition
 build-widget                             install / uninstall / release
 Signing.xcconfig.example                 template for the gitignored Team ID file
-App/HostMain.swift                       entry point; `--placed-widgets` CLI mode
-App/CswapWidgetHostApp.swift             stub host window
-App/CswapWidgetHost.entitlements         sandbox, no exceptions
+App/HostMain.swift                       entry point; `--placed-widgets`; claudeswap://start-backend
+App/CswapWidgetHostApp.swift             stub info window (plain launches only)
+App/CswapWidgetHost.entitlements         no sandbox (see "Start backend")
 Shared/Snapshot.swift                    schema-v1 decoding (shared with the tests)
 Shared/Display.swift                     pure display logic: ramp, severity, formatting, paging
 Shared/Trend.swift                       24h trend: samples in range, time axis, switch markers
 Shared/Navigation.swift                  list navigation state: select, back, scroll, resolve
 Shared/AutoswitchToggle.swift            toggle request file + pending-state resolution
+Shared/AccountSwitch.swift               switch request file, eligibility, pending-state resolution
+Shared/BackendStart.swift                start URL, start marker, "Starting…", finding cswap
+Shared/RequestDrop.swift                 atomic dot-temp + rename writes into the drop directory
 Widget/CswapWidgetBundle.swift           @main WidgetBundle
 Widget/CswapWidget.swift                 provider, Appearance override, widget definition
 Widget/Intents.swift                     Appearance config intent, ‹ › page, select, scroll,
@@ -266,6 +351,7 @@ Widget/Components.swift                  ring, bar, badges, window row, pager
 Widget/Pages.swift                       small and medium layouts
 Widget/LargePages.swift                  large layout, account card, trend panel
 Widget/AutoStatusLine.swift              the auto-switch chip and its state line
+Widget/ActionControls.swift              Switch to this account, Start backend
 Widget/ExtraLargePage.swift              extra-large master-detail: list rows, model usage
 Widget/DetailPages.swift                 per-account detail page
 Widget/SnapshotFile.swift                the only place the snapshot and request paths are decided
@@ -274,6 +360,8 @@ Tests/SnapshotGoldenTests.swift          decodes ../tests/fixtures/snapshot_gold
 Tests/AutoswitchFixtureTests.swift       decodes Tests/Fixtures/snapshot_autoswitch.json
 Tests/DisplayTests.swift                 Shared/Display.swift
 Tests/AutoswitchToggleTests.swift        Shared/AutoswitchToggle.swift
+Tests/AccountSwitchTests.swift           Shared/AccountSwitch.swift
+Tests/BackendStartTests.swift            Shared/BackendStart.swift
 ```
 
 `CswapWidget.xcodeproj`, `Signing.xcconfig`, `build/` and both generated
@@ -298,9 +386,10 @@ never sees it half-written.
 
 All four sizes (small, medium, large, extra-large), a per-widget Appearance
 setting (System/Light/Dark, from Edit Widget), and an auto-switch line with a
-toggle on large and extra-large. When the snapshot is more than 3 minutes old
-the header says "Backend not running · updated 13m ago" instead of the time
-(shortened to fit beside the large pager). Small, medium and large page with ‹ ›, with a detail page per
+toggle on large and extra-large, and "Switch to this account" in the
+selected account's detail. When the snapshot is more than 3 minutes old the
+header says "Backend stopped · updated 13m ago" instead of the time, with a
+"Start backend" chip (both shortened to fit beside the large pager). Small, medium and large page with ‹ ›, with a detail page per
 account.
 
 Extra-large is master-detail with no pager. The left column lists the
@@ -318,9 +407,9 @@ Opus/Sonnet/Haiku/Fable appear -- and the 5h trend with its line emphasized.
 On every size, a tap that misses every control reloads the widget
 (`RefreshIntent`) rather than launching the stub host app. The catcher sits
 behind the whole widget rect -- content margins are disabled, so that includes
-the padding ring -- because there is no `widgetURL` or `Link` anywhere and
-WidgetKit's default for an uncaught tap is to open the container app, whose
-only window says it is a container.
+the padding ring -- because there is no `widgetURL` and WidgetKit's default
+for an uncaught tap is to open the container app, whose only window says it
+is a container. The one `Link`, "Start backend", opens the host on purpose.
 
 The trend's time axis spans the history actually held: from the oldest sample
 or auto-switch (at most 24h back) to now, never narrower than an hour, with

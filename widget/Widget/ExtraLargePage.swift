@@ -189,9 +189,15 @@ struct SelectedDetail: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("SELECTED ACCOUNT")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Text("SELECTED ACCOUNT")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
+                Spacer(minLength: 4)
+                SwitchControl(account: account, context: context)
+            }
             Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 2) {
                 // Email, org and status get the full width and wrap: all
                 // three run long, and half a column cut them mid-word.

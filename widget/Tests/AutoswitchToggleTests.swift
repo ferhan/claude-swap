@@ -67,13 +67,29 @@ final class AutoswitchToggleTests: XCTestCase {
                        ToggleResolution(isOn: false, isPending: false, backendNotRunning: false))
     }
 
-    func testTimeoutRevertsAndBlamesAStaleBackend() {
+    func testTimeoutReverts() {
         let pending = PendingToggle(desired: false, requestedAt: now, delivered: true)
-        XCTAssertEqual(resolve(snapshot: true, stale: true, pending, after: 30),
-                       ToggleResolution(isOn: true, isPending: false, backendNotRunning: true))
-        // A fresh snapshot that disagrees: reverted, but the backend is up.
         XCTAssertEqual(resolve(snapshot: true, stale: false, pending, after: 30),
                        ToggleResolution(isOn: true, isPending: false, backendNotRunning: false))
+    }
+
+    /// The dot and the words come from this one value, so a stale snapshot
+    /// must not leave a pending request showing the asked-for state.
+    func testStaleSnapshotDisablesTheControlAndShowsWhatWasPublished() {
+        let pending = PendingToggle(desired: true, requestedAt: now, delivered: true)
+        let inert = ToggleResolution(isOn: false, isPending: false, backendNotRunning: false, isDisabled: true)
+        XCTAssertEqual(resolve(snapshot: false, stale: true, pending, after: 2), inert)
+        XCTAssertEqual(resolve(snapshot: false, stale: true, pending, after: 45), inert)
+        XCTAssertEqual(resolve(snapshot: false, stale: true, nil), inert)
+        // The failed-write cue is the header's job once the snapshot is stale.
+        let failed = PendingToggle(desired: true, requestedAt: now, delivered: false)
+        XCTAssertEqual(resolve(snapshot: false, stale: true, failed, after: 2), inert)
+    }
+
+    func testFreshSnapshotLeavesTheControlLive() {
+        XCTAssertFalse(resolve(snapshot: true, stale: false, nil).isDisabled)
+        let pending = PendingToggle(desired: false, requestedAt: now, delivered: true)
+        XCTAssertFalse(resolve(snapshot: true, stale: false, pending, after: 5).isDisabled)
     }
 
     func testFailedWriteNeverFlips() {

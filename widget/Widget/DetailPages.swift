@@ -90,7 +90,11 @@ struct LargeDetail: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            DetailHeader(account: account)
+            HStack(spacing: 6) {
+                DetailHeader(account: account)
+                Spacer(minLength: 4)
+                SwitchControl(account: account, context: context)
+            }
             Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 3) {
                 row("Email", account.email)
                 row("Alias", account.alias ?? "—")

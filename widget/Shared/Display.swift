@@ -194,7 +194,7 @@ enum Format {
 
     /// The header's cue for a snapshot nobody is republishing.
     static func backendDown(age seconds: Double) -> String {
-        "Backend not running · updated \(age(seconds: seconds))"
+        "Backend stopped · updated \(age(seconds: seconds))"
     }
 
     /// A duration for the trend's caption and axis: `40m`, `1h 30m`, `6h`.

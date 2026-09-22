@@ -155,6 +155,12 @@ struct SetAutoswitchIntent: SetValueIntent {
 
     func perform() async throws -> some IntentResult {
         let now = Date()
+        // A stale snapshot means no backend to apply the request: the chip is
+        // drawn inert then, but a tap on an older rendering can still land.
+        guard SnapshotFile.load().map({ !$0.isBackendStale(now: now) }) ?? false else {
+            WidgetCenter.shared.reloadTimelines(ofKind: CswapWidget.kind)
+            return .result()
+        }
         let delivered = (try? AutoswitchRequest.write(enabled: value, at: now,
                                                       into: SnapshotFile.requestsDirectory)) != nil
         AutoswitchStore.set(PendingToggle(desired: value, requestedAt: now, delivered: delivered))
@@ -183,6 +189,59 @@ enum AutoswitchStore {
     }
 
     static func set(_ pending: PendingToggle) {
+        guard let data = try? JSONEncoder().encode(pending) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+}
+
+/// "Switch to this account". Like the toggle, it only asks: it drops a
+/// switch request for the backend and remembers the target, so the detail
+/// shows "Switching…" until the snapshot has it active.
+struct SwitchAccountIntent: AppIntent {
+    static let title: LocalizedStringResource = "Switch Claude account from the ClaudeSwap widget"
+    static let isDiscoverable = false
+
+    @Parameter(title: "Account")
+    var number: Int
+
+    init() {}
+
+    init(number: Int) {
+        self.number = number
+    }
+
+    func perform() async throws -> some IntentResult {
+        let now = Date()
+        // A stale snapshot means no backend to apply the request: the button
+        // is not drawn then, but a tap on an older rendering can still land.
+        let backendUp = SnapshotFile.load().map { !$0.isBackendStale(now: now) } ?? false
+        let delivered = backendUp
+            && (try? SwitchRequest.write(to: number, at: now, into: SnapshotFile.requestsDirectory)) != nil
+        SwitchStore.set(PendingSwitch(target: number, requestedAt: now, delivered: delivered))
+        if delivered {
+            // Give the backend its ~1s to apply it, so the reload usually
+            // draws the result rather than "Switching…".
+            for _ in 0..<8 {
+                try? await Task.sleep(for: .milliseconds(250))
+                if SnapshotFile.load()?.activeAccountNumber == number { break }
+            }
+        }
+        WidgetCenter.shared.reloadTimelines(ofKind: CswapWidget.kind)
+        return .result()
+    }
+}
+
+/// The last switch request, in the extension's own sandboxed defaults. One
+/// value: the active account is global, so every widget shows it alike.
+enum SwitchStore {
+    private static let key = "switch.pending"
+
+    static func pending() -> PendingSwitch? {
+        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(PendingSwitch.self, from: data)
+    }
+
+    static func set(_ pending: PendingSwitch) {
         guard let data = try? JSONEncoder().encode(pending) else { return }
         UserDefaults.standard.set(data, forKey: key)
     }

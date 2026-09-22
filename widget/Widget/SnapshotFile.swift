@@ -26,10 +26,13 @@ enum SnapshotFile {
     /// `AutoswitchRequest`). The backend creates it; the widget never does.
     static var requestsDirectory: URL { home.appending(path: ".claude-swap-backup/widget-requests") }
 
+    /// The host app's "a start was asked for" marker (see `BackendStart`).
+    static var backendStartMarker: URL { requestsDirectory.appending(path: BackendStart.markerName) }
+
     // NSHomeDirectory() is the sandbox container, not ~; the passwd entry is
     // the real home the CLI writes into, and also the root the sandbox
     // exceptions' home-relative paths resolve against.
-    private static var home: URL {
+    static var home: URL {
         getpwuid(getuid())
             .map { URL(fileURLWithPath: String(cString: $0.pointee.pw_dir)) }
             ?? FileManager.default.homeDirectoryForCurrentUser
@@ -38,5 +41,9 @@ enum SnapshotFile {
     static func load() -> Snapshot? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         return try? Snapshot.decode(data)
+    }
+
+    static func loadBackendStart() -> Date? {
+        (try? Data(contentsOf: backendStartMarker)).flatMap(BackendStart.markerDate)
     }
 }

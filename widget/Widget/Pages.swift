@@ -35,14 +35,16 @@ struct CswapWidgetView: View {
         if family == .extraLarge {
             ExtraLargePage(
                 context: PageContext(snapshot: snapshot, now: entry.date, family: family, pagerLabel: "",
-                                     pendingToggle: entry.pendingToggle),
+                                     pendingToggle: entry.pendingToggle, pendingSwitch: entry.pendingSwitch,
+                                     backendStartedAt: entry.backendStartedAt),
                 nav: Navigation.resolve(entry.nav, snapshot: snapshot, family: family))
         } else {
             let pages = Paging.pages(for: family, snapshot: snapshot)
             let page = pages[Paging.normalized(entry.pageIndex, count: pages.count)]
             let context = PageContext(snapshot: snapshot, now: entry.date, family: family,
                                       pagerLabel: Paging.label(for: page, snapshot: snapshot),
-                                      pendingToggle: entry.pendingToggle)
+                                      pendingToggle: entry.pendingToggle, pendingSwitch: entry.pendingSwitch,
+                                      backendStartedAt: entry.backendStartedAt)
             switch family {
             case .small: SmallPage(context: context, page: page)
             case .medium: MediumPage(context: context, page: page)
@@ -59,6 +61,8 @@ struct PageContext {
     let family: LayoutFamily
     let pagerLabel: String
     var pendingToggle: PendingToggle?
+    var pendingSwitch: PendingSwitch?
+    var backendStartedAt: Date?
 
     var threshold: Double { snapshot.threshold }
     var isBackendStale: Bool { snapshot.isBackendStale(now: now) }
@@ -72,6 +76,15 @@ struct PageContext {
         }
     }
     var pager: Pager { Pager(family: family, label: pagerLabel) }
+
+    var switchState: SwitchState {
+        AccountSwitch.resolve(activeNumber: snapshot.activeAccountNumber, pending: pendingSwitch, now: now)
+    }
+
+    /// The host app was asked to start the backend moments ago.
+    var isBackendStarting: Bool {
+        BackendStart.isStarting(markerAt: backendStartedAt, snapshotStale: isBackendStale, now: now)
+    }
 
     func isNext(_ account: Account) -> Bool { snapshot.nextCandidate?.number == account.number }
 }
