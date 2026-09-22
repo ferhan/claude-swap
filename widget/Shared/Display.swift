@@ -210,7 +210,10 @@ enum Paging {
         switch family {
         case .small:
             return accounts.flatMap { [Page.hero(account: $0.number), .detail(account: $0.number)] }
-        case .medium, .large, .extraLarge:
+        case .extraLarge:
+            // Master-detail, no pager: see `Navigation`.
+            return []
+        case .medium, .large:
             let count = overviewChunks(for: family, snapshot: snapshot).count
             return (0..<count).map { Page.overview(index: $0, count: count) }
                 + accounts.map { .detail(account: $0.number) }

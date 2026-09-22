@@ -13,15 +13,7 @@ struct LargePage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
-                Image(systemName: "arrow.left.arrow.right")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.tint)
-                    .widgetAccentable()
-                Text("cswap").font(.system(size: 13, weight: .bold))
-                Text("as of \(context.snapshot.takenAt.formatted(date: .omitted, time: .shortened))")
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                BrandTitle(context: context)
                 Spacer(minLength: 4)
                 context.pager
             }
@@ -44,6 +36,25 @@ struct LargePage: View {
     }
 }
 
+/// `⇄ cswap  as of 10:03`, the first line of large and extra-large.
+struct BrandTitle: View {
+    let context: PageContext
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "arrow.left.arrow.right")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.tint)
+                .widgetAccentable()
+            Text("cswap").font(.system(size: 13, weight: .bold))
+            Text("as of \(context.snapshot.takenAt.formatted(date: .omitted, time: .shortened))")
+                .font(.system(size: 9.5))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+}
+
 /// Read-only: the toggle is a later task, so this renders state, not a Toggle.
 struct AutoStatusLine: View {
     let context: PageContext
@@ -61,9 +72,14 @@ struct AutoStatusLine: View {
                 if auto.enabled, let next = context.snapshot.nextCandidate {
                     Text("· next up").fixedSize()
                     InitialsBadge(account: next, size: 14)
-                    AccountTitle(account: next, font: .system(size: 10.5, weight: .semibold))
-                        .foregroundStyle(.primary)
-                    if let peak = next.peakPct { Text("(\(Format.pct(peak)) used)").fixedSize() }
+                    // The "(12% used)" goes before the name is cut short.
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 5) {
+                            nextTitle(next).fixedSize()
+                            if let peak = next.peakPct { Text("(\(Format.pct(peak)) used)").fixedSize() }
+                        }
+                        nextTitle(next)
+                    }
                 }
             } else {
                 Image(systemName: "questionmark.circle")
@@ -73,6 +89,11 @@ struct AutoStatusLine: View {
         .font(.system(size: 10.5))
         .foregroundStyle(.secondary)
         .lineLimit(1)
+    }
+
+    private func nextTitle(_ account: Account) -> some View {
+        AccountTitle(account: account, font: .system(size: 10.5, weight: .semibold))
+            .foregroundStyle(.primary)
     }
 }
 
@@ -148,9 +169,9 @@ struct PaceNote: View {
 
 struct PacePanel: View {
     let context: PageContext
+    let account: Account
 
     var body: some View {
-        let account = context.snapshot.activeAccount ?? context.snapshot.orderedAccounts[0]
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 4) {
                 Text("Weekly pace").font(.system(size: 11, weight: .bold))
@@ -208,6 +229,8 @@ struct PacePanel: View {
 
 struct TrendPanel: View {
     let context: PageContext
+    /// The account drawn heavy; the rest are thin and faded.
+    let emphasized: Int?
     @Environment(\.widgetRenderingMode) private var mode
 
     private static let palette: [Color] = [.blue, .purple, .teal, .pink, .indigo, .brown, .mint]
@@ -262,6 +285,8 @@ struct TrendPanel: View {
         }
     }
 
+    private func isEmphasized(_ account: Account) -> Bool { account.number == emphasized }
+
     private var chart: some View {
         let start = context.now.addingTimeInterval(-Trend.span)
         return Chart {
@@ -270,8 +295,8 @@ struct TrendPanel: View {
                     LineMark(x: .value("Time", point.time), y: .value("5h %", point.pct),
                              series: .value("Account", line.account.label))
                         .foregroundStyle(mode == .fullColor ? line.color : .primary)
-                        .lineStyle(StrokeStyle(lineWidth: line.account.active ? 2.4 : 1.1))
-                        .opacity(line.account.active ? 1 : 0.55)
+                        .lineStyle(StrokeStyle(lineWidth: isEmphasized(line.account) ? 2.4 : 1.1))
+                        .opacity(isEmphasized(line.account) ? 1 : 0.45)
                 }
             }
             RuleMark(y: .value("Threshold", context.threshold))
@@ -294,21 +319,35 @@ struct TrendPanel: View {
         .frame(maxHeight: .infinity)
     }
 
+    /// The emphasized account first, then as many as fit whole in one line;
+    /// the rest are counted rather than truncated to a stub.
     private var legend: some View {
+        let ordered = series.filter { isEmphasized($0.account) } + series.filter { !isEmphasized($0.account) }
+        return ViewThatFits(in: .horizontal) {
+            ForEach((1...max(ordered.count, 1)).reversed(), id: \.self) { count in
+                legendRow(Array(ordered.prefix(count)), hidden: ordered.count - count)
+            }
+        }
+    }
+
+    private func legendRow(_ shown: [Line], hidden: Int) -> some View {
         HStack(spacing: 10) {
-            ForEach(series, id: \.account.number) { line in
+            ForEach(shown, id: \.account.number) { line in
                 HStack(spacing: 3) {
                     Capsule()
                         .fill(mode == .fullColor ? line.color : .primary)
-                        .frame(width: 10, height: line.account.active ? 3 : 1.5)
+                        .frame(width: 10, height: isEmphasized(line.account) ? 3 : 1.5)
                     Text(line.account.label)
-                        .fontWeight(line.account.active ? .semibold : .regular)
+                        .fontWeight(isEmphasized(line.account) ? .semibold : .regular)
                         .lineLimit(1)
-                        .truncationMode(.middle)
                     if let pct = line.account.usage?.fiveHour?.pct {
                         Text(Format.pct(pct)).foregroundStyle(.secondary).monospacedDigit()
                     }
                 }
+                .fixedSize()
+            }
+            if hidden > 0 {
+                Text("+\(hidden)").foregroundStyle(.secondary).fixedSize()
             }
         }
         .font(.system(size: 9.5))

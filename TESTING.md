@@ -215,7 +215,9 @@ pluginkit -m -v | grep -i cswap
 ```
 
 Add it from the widget gallery: right-click the desktop → Edit Widgets → search
-"ClaudeSwap". Small shows the active account; medium shows one row per account.
+"ClaudeSwap". Small, medium and large page with ‹ ›. Extra-large is
+master-detail: tap an account on the left to show its pace, details and trend
+on the right; ▲/▼ appear when the list overflows.
 
 What to check:
 

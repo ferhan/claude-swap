@@ -6,6 +6,8 @@ struct Entry: TimelineEntry {
     let snapshot: Snapshot?
     /// Raw stored page; normalized against the current page list at render.
     let pageIndex: Int
+    /// Raw stored navigation; resolved against the snapshot at render.
+    var nav = NavState()
     let appearance: AppearanceOption
 }
 
@@ -31,10 +33,12 @@ struct Provider: AppIntentTimelineProvider {
     }
 
     private func entry(_ configuration: CswapConfigIntent, _ context: Context) -> Entry {
-        Entry(date: .now,
-              snapshot: SnapshotFile.load(),
-              pageIndex: PageStore.index(LayoutFamily(context.family)),
-              appearance: configuration.appearance)
+        let family = LayoutFamily(context.family)
+        return Entry(date: .now,
+                     snapshot: SnapshotFile.load(),
+                     pageIndex: PageStore.index(family),
+                     nav: NavStore.state(family),
+                     appearance: configuration.appearance)
     }
 }
 

@@ -192,12 +192,15 @@ App/CswapWidgetHostApp.swift             stub host window
 App/CswapWidgetHost.entitlements         sandbox, no exceptions
 Shared/Snapshot.swift                    schema-v1 decoding (shared with the tests)
 Shared/Display.swift                     pure display logic: ramp, severity, paging, trend
+Shared/Navigation.swift                  list navigation state: select, back, scroll, resolve
 Widget/CswapWidgetBundle.swift           @main WidgetBundle
 Widget/CswapWidget.swift                 provider, Appearance override, widget definition
-Widget/Intents.swift                     Appearance config intent, ‹ › page intent + store
+Widget/Intents.swift                     Appearance config intent, ‹ › page, select, scroll and
+                                         refresh intents, page + nav stores
 Widget/Components.swift                  ring, bar, badges, window row, pager
 Widget/Pages.swift                       small and medium layouts
-Widget/LargePages.swift                  large layout, extra-large pace + trend panels
+Widget/LargePages.swift                  large layout, pace + trend panels
+Widget/ExtraLargePage.swift              extra-large master-detail
 Widget/DetailPages.swift                 per-account detail page
 Widget/SnapshotFile.swift                the only place the snapshot path is decided
 Widget/CswapWidgetExtension.entitlements sandbox + the one snapshot read exception
@@ -226,9 +229,17 @@ never sees it half-written.
 
 ## Status
 
-All four sizes (small, medium, large, extra-large), ‹ › paging with a detail
-page per account, a per-widget Appearance setting (System/Light/Dark, from Edit
-Widget), and a read-only auto-switch status line.
+All four sizes (small, medium, large, extra-large), a per-widget Appearance
+setting (System/Light/Dark, from Edit Widget), and a read-only auto-switch
+status line. Small, medium and large page with ‹ ›, with a detail page per
+account.
+
+Extra-large is master-detail with no pager. The left column lists the
+accounts; each row is a button that selects it (default: the active account).
+When the list overflows, ▲/▼ move it a window at a time -- widgets cannot
+scroll. The right column shows the selected account's weekly pace, its details
+and windows, and the 5h trend with its line emphasized. A tap that misses every
+control reloads the widget rather than opening the stub host app.
 
 The `autoswitch` block and 5h `history` are additive and optional: without them
 the threshold defaults to 90%, next-up is omitted and the extra-large trend
@@ -236,9 +247,9 @@ panel says so. `Tests/Fixtures/snapshot_autoswitch.json` is a hand-written
 fixture for those fields until the Python producer emits them and the golden
 fixture can cover them.
 
-Page state lives in the extension's own defaults, keyed by size: WidgetKit
-gives no identifier for a placed widget, so two widgets of the same size page
-together.
+Page and navigation state live in the extension's own defaults, keyed by size:
+WidgetKit gives no identifier for a placed widget, so two widgets of the same
+size page, select and scroll together.
 
 Tests:
 

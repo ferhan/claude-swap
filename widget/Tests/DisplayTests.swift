@@ -102,25 +102,31 @@ final class DisplayTests: XCTestCase {
     func testLargeFitsTheGoldenAccountsOnOnePage() throws {
         let snapshot = try golden()
         XCTAssertEqual(Paging.overviewChunks(for: .large, snapshot: snapshot).count, 1)
-        XCTAssertEqual(Paging.pages(for: .extraLarge, snapshot: snapshot).count, 5)
+        // Extra-large is master-detail and has no pages at all.
+        XCTAssertEqual(Paging.pages(for: .extraLarge, snapshot: snapshot), [])
     }
 
-    func testLargeSplitsWhenCardsOverflow() throws {
-        // Eight copies of the heaviest card cannot share a page.
+    /// The golden document with `count` copies of its first account.
+    private func golden(copies count: Int) throws -> Snapshot {
         let json = try JSONSerialization.jsonObject(
             with: Data(contentsOf: XCTUnwrap(Bundle(for: Self.self)
                 .url(forResource: "snapshot_golden", withExtension: "json")))) as? [String: Any]
         var doc = try XCTUnwrap(json)
         var rows = try XCTUnwrap(doc["accounts"] as? [[String: Any]])
         let first = rows[0]
-        rows = (1...8).map { number in
+        rows = (1...count).map { number in
             var row = first
             row["number"] = number
             row["active"] = number == 1
             return row
         }
         doc["accounts"] = rows
-        let snapshot = try Snapshot.decode(JSONSerialization.data(withJSONObject: doc))
+        return try Snapshot.decode(JSONSerialization.data(withJSONObject: doc))
+    }
+
+    func testLargeSplitsWhenCardsOverflow() throws {
+        // Eight copies of the heaviest card cannot share a page.
+        let snapshot = try golden(copies: 8)
         XCTAssertEqual(snapshot.accounts.count, 8)
         let chunks = Paging.overviewChunks(for: .large, snapshot: snapshot)
         XCTAssertGreaterThan(chunks.count, 1)
@@ -128,6 +134,84 @@ final class DisplayTests: XCTestCase {
         XCTAssertTrue(chunks.allSatisfy { !$0.isEmpty })
         XCTAssertEqual(Paging.label(for: .overview(index: 1, count: chunks.count), snapshot: snapshot),
                        "Overview 2/\(chunks.count)")
+    }
+
+    // MARK: - Navigation
+
+    func testSelectDrillsDownThenBackReturnsToTheList() {
+        let selected = Navigation.select(3, in: NavState(), family: .large)
+        XCTAssertEqual(selected, NavState(mode: .detail, selectedAccountNumber: 3, listOffset: 0))
+        let back = Navigation.back(selected)
+        XCTAssertEqual(back.mode, .list)
+        // The list stays where it was.
+        XCTAssertEqual(back.listOffset, selected.listOffset)
+    }
+
+    func testExtraLargeSelectsInPlace() throws {
+        let snapshot = try golden()
+        let state = Navigation.select(3, in: NavState(listOffset: 0), family: .extraLarge)
+        XCTAssertEqual(state.mode, .list)
+        XCTAssertEqual(state.selectedAccountNumber, 3)
+        XCTAssertEqual(Navigation.resolve(state, snapshot: snapshot, family: .extraLarge), state)
+    }
+
+    func testExtraLargeDefaultsToTheActiveAccount() throws {
+        let snapshot = try golden()
+        let resolved = Navigation.resolve(NavState(), snapshot: snapshot, family: .extraLarge)
+        XCTAssertEqual(resolved.selectedAccountNumber, snapshot.activeAccount?.number)
+        XCTAssertEqual(resolved.mode, .list)
+    }
+
+    func testVanishedSelectionFallsBack() throws {
+        let snapshot = try golden()
+        let stale = NavState(mode: .detail, selectedAccountNumber: 42, listOffset: 0)
+        let large = Navigation.resolve(stale, snapshot: snapshot, family: .large)
+        XCTAssertEqual(large.mode, .list)
+        XCTAssertNil(large.selectedAccountNumber)
+        let extraLarge = Navigation.resolve(stale, snapshot: snapshot, family: .extraLarge)
+        XCTAssertEqual(extraLarge.mode, .list)
+        XCTAssertEqual(extraLarge.selectedAccountNumber, 1)
+    }
+
+    func testExtraLargeListOverflowsInWindowsOfSix() throws {
+        let snapshot = try golden(copies: 9)
+        let chunks = Navigation.listChunks(for: .extraLarge, snapshot: snapshot)
+        XCTAssertEqual(chunks.map(\.count), [6, 3])
+        XCTAssertEqual(Navigation.listChunks(for: .extraLarge, snapshot: try golden()).count, 1)
+    }
+
+    func testScrollMovesByAWindowAndClamps() throws {
+        let chunks = Navigation.listChunks(for: .extraLarge, snapshot: try golden(copies: 14))
+        XCTAssertEqual(chunks.map(\.count), [6, 6, 2])
+        var state = NavState()
+        state = Navigation.scroll(state, by: 1, chunks: chunks)
+        XCTAssertEqual(state.listOffset, 6)
+        state = Navigation.scroll(state, by: 1, chunks: chunks)
+        XCTAssertEqual(state.listOffset, 12)
+        state = Navigation.scroll(state, by: 1, chunks: chunks)
+        XCTAssertEqual(state.listOffset, 12, "clamps at the last window")
+        state = Navigation.scroll(state, by: -5, chunks: chunks)
+        XCTAssertEqual(state.listOffset, 0, "clamps at the first window")
+        state = Navigation.scroll(state, by: -1, chunks: chunks)
+        XCTAssertEqual(state.listOffset, 0)
+    }
+
+    func testOffsetPastTheRowsSnapsToTheLastWindow() throws {
+        // Rows shrank from 14 to 9 while the list was on its third window.
+        let snapshot = try golden(copies: 9)
+        let resolved = Navigation.resolve(NavState(listOffset: 12), snapshot: snapshot, family: .extraLarge)
+        XCTAssertEqual(resolved.listOffset, 6)
+        // Mid-window offsets snap to their window's start.
+        XCTAssertEqual(Navigation.resolve(NavState(listOffset: 4), snapshot: snapshot,
+                                          family: .extraLarge).listOffset, 0)
+        XCTAssertEqual(Navigation.resolve(NavState(listOffset: -3), snapshot: snapshot,
+                                          family: .extraLarge).listOffset, 0)
+    }
+
+    func testNavStateRoundTripsThroughJSON() throws {
+        let state = NavState(mode: .detail, selectedAccountNumber: 2, listOffset: 6)
+        let decoded = try JSONDecoder().decode(NavState.self, from: JSONEncoder().encode(state))
+        XCTAssertEqual(decoded, state)
     }
 
     func testNormalizedWraps() {

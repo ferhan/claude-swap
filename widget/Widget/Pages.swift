@@ -20,23 +20,19 @@ struct CswapWidgetView: View {
     private var family: LayoutFamily { LayoutFamily(widgetFamily) }
 
     @ViewBuilder private func loaded(_ snapshot: Snapshot) -> some View {
-        let pages = Paging.pages(for: family, snapshot: snapshot)
-        let page = pages[Paging.normalized(entry.pageIndex, count: pages.count)]
-        let context = PageContext(snapshot: snapshot, now: entry.date, family: family,
-                                  pagerLabel: Paging.label(for: page, snapshot: snapshot))
-        switch family {
-        case .small: SmallPage(context: context, page: page)
-        case .medium: MediumPage(context: context, page: page)
-        case .large: LargePage(context: context, page: page)
-        case .extraLarge:
-            HStack(alignment: .top, spacing: 14) {
-                LargePage(context: context, page: page)
-                    .frame(width: 340)
-                Divider()
-                VStack(alignment: .leading, spacing: 12) {
-                    PacePanel(context: context)
-                    TrendPanel(context: context)
-                }
+        if family == .extraLarge {
+            ExtraLargePage(
+                context: PageContext(snapshot: snapshot, now: entry.date, family: family, pagerLabel: ""),
+                nav: Navigation.resolve(entry.nav, snapshot: snapshot, family: family))
+        } else {
+            let pages = Paging.pages(for: family, snapshot: snapshot)
+            let page = pages[Paging.normalized(entry.pageIndex, count: pages.count)]
+            let context = PageContext(snapshot: snapshot, now: entry.date, family: family,
+                                      pagerLabel: Paging.label(for: page, snapshot: snapshot))
+            switch family {
+            case .small: SmallPage(context: context, page: page)
+            case .medium: MediumPage(context: context, page: page)
+            case .large, .extraLarge: LargePage(context: context, page: page)
             }
         }
     }
