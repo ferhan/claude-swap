@@ -6,7 +6,9 @@ import SwiftUI
 /// app. This is that app. Account switching, usage, settings and the live
 /// auto-switch engine all live in the `cswap` CLI/TUI and the menu bar; none
 /// of it is reimplemented here.
-@main
+///
+/// Not `@main`: `HostMain` decides first whether this launch is the
+/// `--placed-widgets` query, which must never start the UI.
 struct CswapWidgetHostApp: App {
     var body: some Scene {
         Window("cswap Widget", id: "main") {
