@@ -56,6 +56,10 @@ targets:
         # has to be named ClaudeSwap.app; the bundle id stays com.cswap.widget
         # so registration identity does not change.
         PRODUCT_NAME: ClaudeSwap
+        # App/Assets.xcassets/AppIcon.appiconset -- drawn by make-app-icon.swift
+        # and committed. Without an icon the gallery sidebar and Finder show a
+        # blank placeholder.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_ENTITLEMENTS: App/CswapWidgetHost.entitlements
         INFOPLIST_KEY_NSHumanReadableCopyright: ""
     info:
@@ -66,6 +70,10 @@ targets:
         # say "ClaudeSwap".
         CFBundleDisplayName: ClaudeSwap
         CFBundleName: ClaudeSwap
+        # The Info.plist is written by XcodeGen, not by Xcode's own generator,
+        # so the key that points LaunchServices at the compiled AppIcon has to
+        # be stated here.
+        CFBundleIconName: AppIcon
         LSApplicationCategoryType: public.app-category.developer-tools
         # Must match the extension's -- see CURRENT_PROJECT_VERSION above.
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
