@@ -521,8 +521,16 @@ def open_surface(backup_dir: Path, kind: str | None, home: Path | None = None):
 # host app, which alone can call WidgetCenter, how many are placed. The app
 # answers `{"count": N}` on stdout and exits 0; anything else is "unknown".
 
-# Where `cswap widget install` puts the host app. Spelled once.
+# Where the host app may live, in the order the backend looks: `~/Applications`
+# is what `build-widget install` writes, `/Applications` is where dragging it
+# out of the .dmg puts it, and the widget's README says the choice is the
+# user's. First one whose binary exists wins; with neither present the first
+# is what the "no host app" log line names, so it points somewhere useful.
+# CSWAP_WIDGET_APP (full path to the .app) overrides both, for a copy kept
+# anywhere else.
 WIDGET_HOST_APP = Path("Applications") / "ClaudeSwap.app"
+SYSTEM_APPLICATIONS = Path("/Applications")
+WIDGET_APP_ENV = "CSWAP_WIDGET_APP"
 _PLACED_WIDGETS_TIMEOUT_S = 10.0
 # The retire check runs every 5s; widgets are placed and removed by hand, so
 # a few minutes of lag is fine and saves spawning the app 60 times a minute.
@@ -536,9 +544,33 @@ _PLACED_WIDGETS_CONFIRM_S = 15.0
 _PLACED_WIDGETS_STREAK_GAP_S = 60.0
 
 
+def widget_host_candidates(home: Path | None = None) -> list[Path]:
+    """Every binary that might answer ``--placed-widgets``, best first."""
+    override = os.environ.get(WIDGET_APP_ENV)
+    apps = (
+        [Path(override).expanduser()]
+        if override
+        else [
+            (home or Path.home()) / WIDGET_HOST_APP,
+            SYSTEM_APPLICATIONS / WIDGET_HOST_APP.name,
+        ]
+    )
+    return [app / "Contents" / "MacOS" / "ClaudeSwap" for app in apps]
+
+
 def widget_host_executable(home: Path | None = None) -> Path:
-    """The host app's binary, which answers ``--placed-widgets``."""
-    return (home or Path.home()) / WIDGET_HOST_APP / "Contents" / "MacOS" / "ClaudeSwap"
+    """The host app's binary, which answers ``--placed-widgets``.
+
+    The first candidate that exists, and the first candidate regardless when
+    none does. Looking in one fixed place was a bug with teeth: installed to
+    ``/Applications`` the probe read 0, so the backend retired with a widget
+    on screen and did it again after every login.
+    """
+    candidates = widget_host_candidates(home)
+    for exe in candidates:
+        if exe.is_file():
+            return exe
+    return candidates[0]
 
 
 class PlacedWidgets:

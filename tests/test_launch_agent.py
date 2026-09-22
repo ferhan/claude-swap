@@ -32,6 +32,20 @@ def _on_macos():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _isolated_system_applications(tmp_path, monkeypatch):
+    """Point the ``/Applications`` host-app candidate at a tmp directory.
+
+    ``home`` is already a tmp path everywhere here, but the second candidate
+    is absolute: left alone, whether the widget happens to be installed on
+    the machine running the suite would decide the answer.
+    """
+    monkeypatch.delenv(launch_agent.WIDGET_APP_ENV, raising=False)
+    monkeypatch.setattr(
+        launch_agent, "SYSTEM_APPLICATIONS", tmp_path / "system-Applications"
+    )
+
+
 def _completed(returncode: int = 0, stdout: str = "", stderr: str = ""):
     return subprocess.CompletedProcess(
         args=["launchctl"], returncode=returncode, stdout=stdout, stderr=stderr
@@ -801,14 +815,64 @@ class TestRetireBackendIfIdle:
         assert launch_agent.plist_path(launch_agent.AUTO_LABEL, tmp_path).exists()
 
 
-class TestPlacedWidgetsKeepTheBackend:
-    """A widget on the desktop is a viewer the surface locks cannot see."""
+class TestWhereTheHostAppIs:
+    """The probe looks in every place the app is normally installed.
 
-    def _app(self, home: Path) -> Path:
-        exe = launch_agent.widget_host_executable(home)
+    ``~/Applications`` is what ``build-widget install`` writes; dragging the
+    app out of the .dmg puts it in ``/Applications``. Looking only in the
+    first meant the second read 0 placed widgets, so the backend retired with
+    a widget on screen — and again after every login.
+    """
+
+    @staticmethod
+    def _install(app: Path) -> Path:
+        exe = app / "Contents" / "MacOS" / "ClaudeSwap"
         exe.parent.mkdir(parents=True)
         exe.write_text("#!/bin/sh\n")
         return exe
+
+    def test_finds_the_app_in_slash_applications(self, tmp_path):
+        exe = self._install(launch_agent.SYSTEM_APPLICATIONS / "ClaudeSwap.app")
+        assert launch_agent.widget_host_executable(tmp_path) == exe
+
+    def test_prefers_the_home_copy(self, tmp_path):
+        self._install(launch_agent.SYSTEM_APPLICATIONS / "ClaudeSwap.app")
+        home_exe = self._install(tmp_path / launch_agent.WIDGET_HOST_APP)
+        assert launch_agent.widget_host_executable(tmp_path) == home_exe
+
+    def test_names_the_home_copy_when_neither_is_installed(self, tmp_path):
+        # The "no host app at …" log line should point somewhere useful.
+        assert launch_agent.widget_host_executable(tmp_path) == (
+            tmp_path / launch_agent.WIDGET_HOST_APP / "Contents" / "MacOS" / "ClaudeSwap"
+        )
+
+    def test_the_env_override_wins(self, tmp_path, monkeypatch):
+        self._install(tmp_path / launch_agent.WIDGET_HOST_APP)
+        elsewhere = tmp_path / "dev" / "ClaudeSwap.app"
+        exe = self._install(elsewhere)
+        monkeypatch.setenv(launch_agent.WIDGET_APP_ENV, str(elsewhere))
+        assert launch_agent.widget_host_executable(tmp_path) == exe
+        assert launch_agent.widget_host_candidates(tmp_path) == [exe]
+
+
+class TestPlacedWidgetsKeepTheBackend:
+    """A widget on the desktop is a viewer the surface locks cannot see."""
+
+    def _app(self, home: Path, app: Path | None = None) -> Path:
+        exe = (app or home / launch_agent.WIDGET_HOST_APP) / "Contents" / "MacOS" / "ClaudeSwap"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("#!/bin/sh\n")
+        return exe
+
+    def test_a_widget_in_slash_applications_keeps_the_backend(self, tmp_path):
+        _install_plist(tmp_path, launch_agent.AUTO_LABEL, [*PROGRAM, "auto"])
+        exe = self._app(tmp_path, launch_agent.SYSTEM_APPLICATIONS / "ClaudeSwap.app")
+        widgets, run, calls = self._probe(iter([self._done('{"count": 1}\n')]))
+        with patch.object(launch_agent.subprocess, "run", run):
+            assert launch_agent.retire_backend_if_idle(
+                tmp_path, home=tmp_path, widgets=widgets
+            ) is False
+        assert calls == [[str(exe), "--placed-widgets"]]
 
     def _probe(self, answers, clock=lambda: 0.0):
         """A PlacedWidgets whose host app answers from ``answers`` in turn."""
