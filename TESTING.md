@@ -208,14 +208,14 @@ it polls, measures, publishes the snapshot and reports what it *would* do.
 
 ## 6. The widget
 
-Already installed at `~/Applications/cswap.app` and registered:
+Already installed at `~/Applications/ClaudeSwap.app` and registered:
 
 ```bash
 pluginkit -m -v | grep -i cswap
 ```
 
 Add it from the widget gallery: right-click the desktop → Edit Widgets → search
-"cswap". Small shows the active account; medium shows one row per account.
+"ClaudeSwap". Small shows the active account; medium shows one row per account.
 
 What to check:
 

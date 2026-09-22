@@ -59,10 +59,14 @@ after editing `project.yml`.
 
 `install` runs the preflight checks below, regenerates the project, builds
 Debug into `build/` (gitignored), copies the host app to
-`~/Applications/cswap.app` and registers it with `lsregister`. Then
+`~/Applications/ClaudeSwap.app` and registers it with `lsregister`. Then
 add the widget from the gallery: right-click the desktop, Edit Widgets, and
-look for **cswap**. Nothing is launched — an extension is registered by being
+look for **ClaudeSwap**. Nothing is launched — an extension is registered by being
 on disk in a known app, not by running one.
+
+Earlier builds installed as `~/Applications/CswapWidgetHost.app` and then
+`~/Applications/cswap.app`; `install` and `uninstall` both deregister and
+delete either one if it is still there.
 
 Preflight refuses early, with the fix rather than a stack of xcodebuild noise:
 no usable `xcodebuild`, no `xcodegen`, no `Signing.xcconfig`, an empty
@@ -170,7 +174,7 @@ on it, and stops if it is not:
 
 ```bash
 codesign -d --entitlements - --xml \
-  build/export/cswap.app/Contents/PlugIns/CswapWidgetExtension.appex \
+  build/export/ClaudeSwap.app/Contents/PlugIns/CswapWidgetExtension.appex \
   | plutil -p -
 ```
 

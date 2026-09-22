@@ -53,9 +53,9 @@ targets:
         # The widget gallery's sidebar uses LaunchServices' display name,
         # which for an unlocalized bundle falls back to the .app filename --
         # not CFBundleName/CFBundleDisplayName below. So the product itself
-        # has to be named cswap.app; the bundle id stays com.cswap.widget so
-        # registration identity does not change.
-        PRODUCT_NAME: cswap
+        # has to be named ClaudeSwap.app; the bundle id stays com.cswap.widget
+        # so registration identity does not change.
+        PRODUCT_NAME: ClaudeSwap
         CODE_SIGN_ENTITLEMENTS: App/CswapWidgetHost.entitlements
         INFOPLIST_KEY_NSHumanReadableCopyright: ""
     info:
@@ -63,9 +63,9 @@ targets:
       properties:
         # The widget gallery groups widgets under the host app's name, and
         # LaunchServices shows CFBundleName for an unlocalized bundle, so both
-        # say "cswap".
-        CFBundleDisplayName: cswap
-        CFBundleName: cswap
+        # say "ClaudeSwap".
+        CFBundleDisplayName: ClaudeSwap
+        CFBundleName: ClaudeSwap
         LSApplicationCategoryType: public.app-category.developer-tools
         # Must match the extension's -- see CURRENT_PROJECT_VERSION above.
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
@@ -93,7 +93,7 @@ targets:
     info:
       path: Widget/Info.plist
       properties:
-        CFBundleDisplayName: cswap
+        CFBundleDisplayName: ClaudeSwap
         # Must match the host's -- see CURRENT_PROJECT_VERSION above.
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:

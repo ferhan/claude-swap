@@ -74,7 +74,7 @@ struct CswapWidget: Widget {
         AppIntentConfiguration(kind: Self.kind, intent: CswapConfigIntent.self, provider: Provider()) { entry in
             WidgetRoot(entry: entry)
         }
-        .configurationDisplayName("cswap")
+        .configurationDisplayName("ClaudeSwap")
         .description("Claude account usage at a glance.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge, .systemExtraLarge])
         .contentMarginsDisabled()
