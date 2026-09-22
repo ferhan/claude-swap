@@ -79,8 +79,33 @@ ls -l ~/.claude-swap-backup/snapshot.json
 ```
 
 The service runs `cswap auto --json`, so the raw log is JSONL; `service logs`
-renders the `human` field back for you. The snapshot should be rewritten each
-tick (default 60s) at `0600`.
+renders the `human` field back for you. The snapshot is rewritten **every 60s
+on its own timer** (not per tick) at `0600`, plus once at the end of each
+tick. Check it keeps moving even when the engine is asleep for a long time:
+
+```bash
+# Put the engine on a long sleep, then watch the snapshot anyway.
+.venv/bin/cswap config set autoswitch.intervalSeconds 3600
+for i in 1 2 3; do stat -f '%Sm %N' ~/.claude-swap-backup/snapshot.json; sleep 70; done
+.venv/bin/cswap config set autoswitch.intervalSeconds 60
+```
+
+The mtime should advance every ~60s across all three lines. (It has to: the
+widget calls a snapshot older than 180s a stopped backend.)
+
+### Its logs stay bounded
+
+```bash
+ls -lh ~/Library/Logs/com.cswap.auto.{log,err} ~/Library/Logs/com.cswap.auto.*.1 2>/dev/null
+```
+
+Past 8 MB the backend copies the file to `<path>.1` and truncates it in
+place, within 5 minutes. To force it, append ~9 MB to the log
+(`dd if=/dev/zero bs=1m count=9 | tr '\0' 'x' >> ~/Library/Logs/com.cswap.auto.log`)
+and wait: the `.log` drops to a few hundred bytes, `.log.1` holds the old
+content, the inode is unchanged (`stat -f %i`), and an open `service logs -f`
+keeps printing new lines. A TUI open across the truncation must **not**
+replay old switches as new events.
 
 ---
 
@@ -214,7 +239,9 @@ it polls, measures, publishes the snapshot and reports what it *would* do.
 
 ## 6. The widget
 
-Already installed at `~/Applications/ClaudeSwap.app` and registered:
+Already installed at `~/Applications/ClaudeSwap.app` (or `/Applications` — the
+backend looks in both, and `CSWAP_WIDGET_APP` names an `.app` anywhere else)
+and registered:
 
 ```bash
 pluginkit -m -v | grep -i cswap
@@ -245,6 +272,9 @@ What to check:
 
 ### A placed widget keeps the backend alive
 
+Run live: self-retirement observed, and `--placed-widgets` answered a real
+count (4).
+
 ```bash
 ~/Applications/ClaudeSwap.app/Contents/MacOS/ClaudeSwap --placed-widgets   # {"count": N}
 ```
@@ -267,9 +297,12 @@ the backend retires as before.
 
 ### The auto-switch toggle
 
+Run live: the round trip from the widget applied three requests.
+
 The widget drops `autoswitch-<epochMillis>.json` in
-`~/.claude-swap-backup/widget-requests/` (created 0700 by the backend). To
-test the backend half without the widget:
+`~/.claude-swap-backup/widget-requests/` (created 0700 by the backend, which
+also corrects the mode of a directory that is already there). To test the
+backend half without the widget:
 
 ```bash
 d=~/.claude-swap-backup/widget-requests
@@ -280,9 +313,20 @@ mv "$d/.tmp" "$d/autoswitch-$(($(date +%s)*1000)).json"
 Within ~1s the file is gone, `cswap config get autoswitch.enabled` is
 `true`, `.err` has `widget: autoswitch.enabled -> true (requested …)`, and
 `snapshot.json`'s `autoswitch.enabled` follows within a tick's duration.
-Also check: two files at once → the larger `epochMillis` wins; a garbage
-file is deleted and changes nothing; a dotfile is left alone. With the
-backend stopped, a dropped file waits and is applied when it next starts.
+Also check: two files at once → the larger `epochMillis` wins and the other
+logs `ignored superseded autoswitch request`; a garbage file is deleted and
+changes nothing; a dotfile is left alone. With the backend stopped, a dropped
+file waits and is applied when it next starts — **while it is under 15
+minutes old**. Past that:
+
+```bash
+d=~/.claude-swap-backup/widget-requests
+printf '{"autoswitch":{"enabled":true},"at":"old"}' > "$d/.tmp"
+mv "$d/.tmp" "$d/autoswitch-$((($(date +%s)-1200)*1000)).json"
+```
+
+→ deleted, setting unchanged, `.err` has `widget: ignored stale autoswitch
+request (true, age 1200s, requested old)`.
 
 ### Switching from the widget
 
@@ -360,11 +404,72 @@ strays with `pluginkit -r <path>`.
 
 ---
 
+## 7. Not yet run live
+
+Everything below is unit-tested with the subprocess, launchd and the files
+stubbed, and has never been exercised against the real app. Work through it
+in order; each step says what to expect.
+
+- [ ] **Start backend, from the widget.** Stop the backend (close every
+      surface, remove every widget, wait for it to retire — `cswap service
+      status` says not running). Place a widget again; after ~3 minutes it
+      draws stale and offers *Start backend*. Tap it.
+      → the host app launches, runs `snapshot.json`'s `cswapCommand` plus
+      `["service", "start"]`, and `cswap service status` shows `running (pid
+      …)` within a few seconds. `snapshot.json`'s mtime starts advancing
+      every ~60s and the widget redraws live on its next reload. Nothing in
+      `~/Library/Logs/com.cswap.auto.err` beyond the usual startup lines.
+
+- [ ] **Switch from a widget tap.** With the backend running and at least two
+      managed, enabled accounts, tap a non-active account row.
+      → within ~1s `cswap status` shows that account; `.err` has `widget:
+      Switched to Account-N (email), from Account-M (requested …)`; the
+      request file is gone from `~/.claude-swap-backup/widget-requests/`;
+      `jq .lastSwitchAt ~/.claude-swap-backup/autoswitch_state.json` is the
+      switch's timestamp (the manual cooldown); the widget shows the new
+      active account on its next reload. Tapping a **dimmed** (disabled) row
+      must log `refused switch request to N: Account-N is disabled` and
+      change nothing.
+
+- [ ] **Upgrade-triggered reinstall.** With the backend running, note its pid
+      (`cswap service status`). Bump the version (`uv tool upgrade cswap`, or
+      edit `__version__` and reinstall the dev build), then open a TUI.
+      → `needs_install` sees the plist's `CSWAP_VERSION` differ, boots the
+      job out and bootstraps afresh: a **new pid**, and `launchctl print
+      gui/$UID/com.cswap.auto` shows `CSWAP_VERSION` equal to the new
+      version. The TUI reports the backend as the engine owner, not itself.
+
+- [ ] **Open at Login.** In the menu bar, toggle *Open at Login* off.
+      → `~/Library/LaunchAgents/com.cswap.menubar.plist` is deleted (or
+      rewritten with `RunAtLoad: false`); log out and in and the menu bar
+      does not come back. Toggle it on again → the plist returns with
+      `RunAtLoad: true`, and the menu bar is there after the next login.
+      Note *Quit* is not this: it leaves the plist alone on purpose.
+
+- [ ] **Retire and return across a logout.** Place a widget, close every
+      surface, and confirm the backend stays up (`backend: 1 widget(s)
+      placed` in `.err`) with its plist still in `~/Library/LaunchAgents/`.
+      Log out and back in without opening anything.
+      → `RunAtLoad` starts it; after the 30s grace it asks the app again and
+      stays (`service status` shows running, `snapshot.json` keeps
+      advancing). Then remove the widget and wait ~5 minutes → `backend: no
+      widgets placed`, `.backend-retiring` appears briefly in
+      `~/.claude-swap-backup/`, the plist is deleted, the process exits 0,
+      and the flag is gone the next time a surface opens. If the app could
+      not answer that early in the session, `.err` says
+      `placed widgets unknown (…)` and the backend retires — the next
+      surface brings it back.
+
+---
+
 ## Known gaps — expect these, they are not regressions
 
-- **Placed-widget keep-alive, the request directory (toggle and switch) and
-  `cswap service start` from the host app have not been run against the real
-  widget/host app** — unit tests stub the subprocess, launchd and the files.
+- **Five paths have not been run against the real widget/host app** — unit
+  tests stub the subprocess, launchd and the files. Runnable steps for each
+  are in §7, above: the Start backend URL tap, a switch tap
+  on a widget row, an upgrade-triggered reinstall, *Open at Login*, and
+  retire/return across a logout. (Placed-widget keep-alive, the request
+  directory and `--placed-widgets` **have** been run live — see §6.)
 - **Every rumps-bound menu bar path is untested.** `MenuBarApp` is defined
   inside `run()` and needs a live NSApp, so there is no harness. The pure
   helpers it composes are tested; the wiring is reviewed, not executed.

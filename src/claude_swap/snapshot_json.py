@@ -16,6 +16,11 @@ Two deliberate differences from the ``--list --json`` row:
 * **Weekly windows are rolled forward** (see ``pace.rolled_weekly_window``): a
   weekly window whose reset has passed is reported zeroed, not stale, exactly
   as the menu bar draws it.
+* **``usage.scoped[]`` is grouped by model family** (see
+  ``_collapse_scoped_by_family``). The API names per-model weekly windows by
+  full display name, so "Claude Opus 4.8" and "Opus 5" arrive as two rows for
+  what a display should show as one line. Here they collapse onto the family
+  word; ``--list --json`` still serves the raw windows.
 
 Raw ``resetsAt`` survives every projection, so a widget counts down live
 without calling back in.

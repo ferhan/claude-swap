@@ -157,6 +157,33 @@ The schema is pinned by a golden fixture, `tests/fixtures/snapshot_golden.json`,
 asserted from both sides — a Python test against the producer and a Swift test
 against the decoder. A field renamed on either side fails both.
 
+**Published on a timer, not on the tick.** The engine republishes every 60s
+(`autoswitch.SNAPSHOT_PUBLISH_INTERVAL_S`) from a thread of its own, and a
+tick asks that thread for an extra publish so a switch still lands
+immediately. A tick is not a heartbeat: the loop sleeps up to `MAX_SLEEP_S`
+when the fleet is blocked, `NO_RESET_FALLBACK_S` on an idle hold, and
+`autoswitch.intervalSeconds` may be set as high as an hour — while the widget
+reads a snapshot older than 180s as a stopped backend and offers to start the
+one that is already running. The thread is the file's only writer while it
+runs, its pass is store-only (it re-serializes what the engine collected and
+generates no network traffic of its own), and it stops with the loop. Any
+looping engine with a snapshot path does this, `--backend` or hand-run;
+`--no-snapshot`, and the in-process engines the TUI and menu bar host, start
+no thread and write nothing.
+
+**`usage.scoped[]` is grouped by model family** in this payload, and only in
+this payload (`snapshot_json._collapse_scoped_by_family`; `--list --json`
+serves the raw windows). The API reports per-model weekly windows under
+their full display names, so "Claude Opus 4.8" and "Opus 5" arrive as two
+rows for what a display should show as one line: Opus. Rows whose name
+contains `opus`, `sonnet`, `haiku` or `fable` collapse onto that word; a name
+matching none passes through unchanged; order of first appearance is kept.
+When several windows merge, `pct` is the **max** across the group (the
+binding constraint) and `maxed` is true if any of them is maxed, while
+`resetsAt`, the countdown and the pace fields all come from whichever window
+carries that max — a tie keeping the first seen — since that is the window
+actually gating.
+
 Changes are additive only; `schemaVersion` stays 1 while old readers keep
 decoding. Three additions are backend-sourced:
 
@@ -284,8 +311,10 @@ cswap menubar             install + start the menu bar agent, return the prompt
 cswap service status      is the backend running, and which build is launchd holding
 cswap service logs        tail the event stream
 cswap service start       ensure the backend is running, without a surface
-cswap widget install      build and install the widget locally
 ```
+
+The widget has no `cswap` subcommand: it is built and installed by
+`./widget/build-widget` (see "Not built", below).
 
 `cswap auto` remains the foreground / `--once` engine for cron and debugging.
 It is no longer the thing you install. (`cswap auto --install-service` still
@@ -312,21 +341,37 @@ The backend runs exactly while some surface is open, or a widget is placed.
    opens and falls back to hosting its own engine.
 2. The backend (only when started with `--backend`) checks every 5s, after a
    30s startup grace, under the same lifecycle lock (try-acquire; skip the
-   round if busy): if no surface lock is held, it deletes its own plist and
-   stops its engine; the process exits 0, which `KeepAlive: {SuccessfulExit:
-   false}` does not restart. Liveness is try-acquire, so a crashed surface
-   counts as gone.
+   round if busy): if no surface lock is held, it **announces the retirement**
+   (writes `<backup>/.backend-retiring`), deletes its own plist and stops its
+   engine; the process exits 0, which `KeepAlive: {SuccessfulExit: false}`
+   does not restart. Liveness is try-acquire, so a crashed surface counts as
+   gone.
+
+   The announcement exists because the process does not exit here — it
+   finishes the tick it is in first, seconds to tens of seconds, and through
+   that window it is a live pid with matching argv and version, which is
+   exactly what `needs_install` calls "running". A surface opening then used
+   to be told the backend was fine and end up with `managed=True`, no engine
+   and no plist to bring one back. `open_surface` now treats the
+   announcement as *not running* and reinstalls unconditionally (the
+   bootout ends the old process), clearing the flag only once a backend is
+   really back. Both halves run under the lifecycle lock, so the
+   announcement and the plist removal are one decision and reading them is
+   another. A backend clears any stale flag as it starts.
 3. It does not `bootout` itself — that would have launchd SIGTERM the process
    waiting on `launchctl`. The job's record stays loaded but idle until
    logout, or until the next surface's install boots it out and bootstraps.
 
 4. **A placed widget counts as a viewer.** It cannot hold a surface lock —
    WidgetKit wakes the extension only to draw — so when no surface is live
-   the backend asks the widget's host app: `~/Applications/ClaudeSwap.app/
-   Contents/MacOS/ClaudeSwap --placed-widgets` prints `{"count": N}` and
-   exits 0 (`launch_agent.PlacedWidgets`; the path is spelled once, in
-   `widget_host_executable`). `count > 0` keeps the backend **and its
-   plist**. Missing app, timeout (10s), non-zero exit or unparsable output
+   the backend asks the widget's host app: `ClaudeSwap.app/Contents/MacOS/
+   ClaudeSwap --placed-widgets` prints `{"count": N}` and exits 0
+   (`launch_agent.PlacedWidgets`). It is looked for in `~/Applications`
+   (where `build-widget install` puts it) and then `/Applications` (where
+   dragging it out of the .dmg puts it), first one that exists winning;
+   `CSWAP_WIDGET_APP` names an `.app` anywhere else and overrides both. The
+   list is spelled once, in `widget_host_candidates`. `count > 0` keeps the
+   backend **and its plist**. Missing app, timeout (10s), non-zero exit or unparsable output
    read as 0, so it retires exactly as before; each distinct answer is logged
    once to `com.cswap.auto.err`. The answer is cached for 5 minutes, so
    removing the last widget retires the backend within ~5 minutes, and the
@@ -353,6 +398,29 @@ failure would be relaunched every ~10s for as long as that loop runs. The
 next surface to open sees it not running and starts it again. A hand-run
 `cswap auto` refused the same way still exits 1.
 
+#### The backend trims its own logs
+
+The plist points `StandardOutPath`/`StandardErrorPath` at
+`~/Library/Logs/com.cswap.auto.{log,err}`, and the stdout one is the event
+stream surfaces tail. Nothing rotated them, which mattered once a placed
+widget could keep the backend up around the clock.
+
+launchd opens those files and holds the descriptors for the process's whole
+life, so nothing outside the process can roll them over — a rename would
+leave every further line going to a file nobody can find. The backend checks
+them every 5 minutes and, past 8 MB (`launch_agent.LOG_MAX_BYTES`), copies
+the content to `<path>.1` and truncates the original **in place**, keeping
+the inode. It sets `O_APPEND` on fds 1 and 2 at startup first: without it the
+next write would land at the descriptor's stale offset and leave a hole of
+NULs as long as the old log, reclaiming nothing.
+
+The log is emptied rather than tail-preserved because `BackendEventLog`
+rewinds to 0 when the file it follows shrinks — any tail left behind would
+come back as new events, and the menu bar would notify on yesterday's
+switches. `tail -f`, what `cswap service logs -f` runs, reports the
+truncation and keeps following. One generation is kept, and the handful of
+lines written between the copy and the truncation are lost.
+
 #### Widget requests
 
 The widget's one write path is `<backup>/widget-requests/` (the sandbox
@@ -366,7 +434,11 @@ its own thread — not per tick, because the engine can sleep for minutes or
 hours. Per pass it applies the **newest** valid request (largest
 `epochMillis`) through `settings.set_setting`, the writer behind `cswap
 config set autoswitch.enabled`, deletes every non-dot file it looked at,
-valid or not, and ignores dotfiles. A change is logged as one line to
+valid or not, and ignores dotfiles. The newest must also be **fresh** —
+within 15 minutes (`AUTOSWITCH_MAX_AGE_S`) — or it is dropped with a log
+line, as a stale switch request is; otherwise a tap made this morning would
+flip the setting tonight, when the backend next happened to come back. A
+change is logged as one line to
 `com.cswap.auto.err` and followed by `engine.wake()`: the tick re-reads
 settings and republishes the snapshot, so the widget's optimistic state
 converges within the tick's duration (seconds; longer if a tick is already
@@ -382,8 +454,9 @@ ones only the newest is considered, and only if it is **fresh** — its
 `epochMillis` within 60s of now. Older ones are dropped unapplied with one
 log line each (`widget: ignored stale switch request to N (age …)`).
 
-The freshness rule is why a switch is not an auto toggle. A toggle is a
-setting: applying it late gives the state the user asked for. A switch is an
+The two freshness windows differ by an order of magnitude on purpose. A
+toggle is a setting: applying it a little late still gives the state the user
+asked for, so 15 minutes comfortably covers a backend restart. A switch is an
 act: a click made while the backend was down, applied when it next starts —
 possibly at the next login, hours later — would move the active account out
 from under whatever the user is doing by then. 60s covers a backend busy in
@@ -408,7 +481,11 @@ alone. The recording lives in `ClaudeAccountSwitcher._perform_switch`, the one
 path every surface's switch goes through, and runs after that path's locks are
 released (lock order is state lock, then switch lock); the engine passes
 `manual=False` because it writes its own bookkeeping under the state lock it
-already holds. Only `lastSwitchAt` is written: `lastSwitchTo`/`lastSwitchFrom`
+already holds. It waits up to 60s for the state lock, not `FileLock`'s 10s
+default, because the engine holds that lock across a whole `switch_to`
+(freshen, keychain, file work); giving up warns on stderr as well as in the
+log, since the switch already happened and the engine may move off it on the
+next tick. Only `lastSwitchAt` is written: `lastSwitchTo`/`lastSwitchFrom`
 stay the engine's, so a hand switch still *disarms* the no-return bar instead
 of tripping it, and the switch does not enter `autoswitch.switches` history —
 those chart markers mean auto-switches. The cooldown gates the `proactive` and
@@ -517,8 +594,11 @@ Built and verified:
 - the widget: decoder, views, golden decode test, entitlements, signed build
 - the backend, started by the surfaces and retired by itself when the last
   one closes (observed live against launchd: `service inactive` in the
-  unified log ~30s after a surface-less start); `autoswitch.enabled`, per-tick settings reload, snapshot
-  published each tick
+  unified log ~30s after a surface-less start); `autoswitch.enabled`,
+  per-tick settings reload, snapshot published on its own 60s timer
+- **live against the real host app and widget**: self-retirement, the widget
+  toggle round trip (three requests applied), and `--placed-widgets`
+  answering a real count (4)
 - the **singleton engine lock**, and both surfaces deciding from it rather
   than from the launchd label — this surface owns the engine / the backend
   owns it / something else does are three distinct, separately rendered states
@@ -540,10 +620,12 @@ Not built:
 
 Untested:
 
-- placed-widget keep-alive and the widget request directory (auto toggle and
-  switch requests) against the real host app and widget, and `cswap service
-  start` from the host app (unit-tested with the subprocess, launchd and
-  files stubbed)
+- five paths against the real host app and widget, each unit-tested with the
+  subprocess, launchd and files stubbed (TESTING.md has runnable steps for
+  all five): the host app's **Start backend** URL tap, a **switch tap** on a
+  widget row, an **upgrade-triggered reinstall** (`CSWAP_VERSION` differing),
+  **Open at Login**, and **retire/return across a logout** with a widget
+  placed
 - whether `temporary-exception` passes real notarization (the reasoning is
   sound — it is not profile-gated, and notarization is automated scanning
   rather than the human review that scrutinizes these — but it is unproven
