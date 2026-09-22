@@ -206,8 +206,9 @@ value wins again. Logic: `Shared/AutoswitchToggle.swift`.
 ## Switch to this account
 
 The selected account's detail -- the extra-large right column, the large
-detail view -- carries a "Switch to this account" chip (`Switch` where
-narrow), beside "‹ Back" on large. The active account shows "Active" instead, and an account whose slot
+detail view, the medium right column -- carries a "Switch to this account"
+chip (`Switch` where narrow), beside "‹ Back" on large. Medium draws it at the
+small type scale (`compact`), which is what lets the full wording fit 147pt. The active account shows "Active" instead, and an account whose slot
 holds no stored backup (`switchable: false`) shows "Not switchable": the same
 rule `cswap switch N` applies. A disabled slot stays switchable (disabled only
 leaves automatic rotation), and `kind` is not checked.
@@ -336,9 +337,9 @@ App/HostMain.swift                       entry point; `--placed-widgets`; claude
 App/CswapWidgetHostApp.swift             stub info window (plain launches only)
 App/CswapWidgetHost.entitlements         no sandbox (see "Start backend")
 Shared/Snapshot.swift                    schema-v1 decoding (shared with the tests)
-Shared/Display.swift                     pure display logic: ramp, severity, formatting, paging
+Shared/Display.swift                     pure display logic: ramp, severity, formatting, small's paging
 Shared/Trend.swift                       24h trend: samples in range, time axis, switch markers
-Shared/Navigation.swift                  list navigation state: select, back, scroll, resolve
+Shared/Navigation.swift                  selection state: select, neighbor, back, scroll, resolve
 Shared/AutoswitchToggle.swift            toggle request file + pending-state resolution
 Shared/AccountSwitch.swift               switch request file, eligibility, pending-state resolution
 Shared/BackendStart.swift                start URL, start marker, "Starting…", finding cswap
@@ -349,12 +350,12 @@ Widget/Intents.swift                     Appearance config intent, ‹ › page,
                                          back, scroll, refresh and auto-switch intents,
                                          page/nav/toggle stores
 Widget/Components.swift                  ring, bar, badges, window row, pager
-Widget/Pages.swift                       small and medium layouts
+Widget/Pages.swift                       small; medium's hero, right column and ‹ › selection pager
 Widget/LargePages.swift                  large: list/detail routing, the list, the trend panel
 Widget/AutoStatusLine.swift              the auto-switch chip and its state line
 Widget/ActionControls.swift              Switch to this account, Start backend
-Widget/ExtraLargePage.swift              extra-large master-detail: rows, facts grid, model usage
-Widget/DetailPages.swift                 per-account detail: small/medium parts, the large view
+Widget/ExtraLargePage.swift              extra-large master-detail: rows, pace, model usage
+Widget/DetailPages.swift                 per-account detail: small's parts, the facts grid, the large view
 Widget/SnapshotFile.swift                the only place the snapshot and request paths are decided
 Widget/CswapWidgetExtension.entitlements sandbox + snapshot read + request-drop write exceptions
 Tests/SnapshotGoldenTests.swift          decodes ../tests/fixtures/snapshot_golden.json
@@ -390,12 +391,33 @@ setting (System/Light/Dark, from Edit Widget), and an auto-switch line with a
 toggle on large and extra-large, and "Switch to this account" in the
 selected account's detail. When the snapshot is more than 3 minutes old the
 header says "Backend stopped · updated 13m ago" instead of the time, with a
-"Start backend" chip (both shortened where tight). Small and medium page with
-‹ ›, with a detail page per account.
+"Start backend" chip (both shortened where tight). Small is the one size that
+still pages with ‹ ›, alternating a hero and a detail page per account.
 
-Large and extra-large are master-detail with no pager, off one `NavState`
-(mode, selection, list offset) per size. The account list is the same on both:
-three rows per window at 344pt, each a three-line button that selects it
+Medium, large and extra-large all keep a selection in one `NavState`
+(mode, selection, list offset) per size; only large has a detail mode.
+
+Medium is master-detail for one account at a time, at 344×164. The left column
+is the compact hero -- initials, name, subtitle, the 5h ring with its ticking
+countdown, the weekly bar with its percent and `3d 11h` -- at a fixed 150pt.
+The 147pt right column is the same account's detail, and repeats none of it:
+‹ 2/6 › and the auto-switch badge on the top line, the email across the full
+width below it (10.5pt, scaling to 0.75 before it truncates at the tail), then
+the facts grid in its compact form -- org, alias, `kind`/`updated` sharing a
+row, status -- at 10pt, and the switch control on the bottom line. "BY MODEL"
+is what does not fit in the remaining ~13pt and is the one thing extra-large's
+right column has that medium's does not; the trend and the pace strip are the
+others.
+
+The ‹ › move the **selection**, not a page: they run the same
+`SelectAccountIntent` a row tap runs on the larger sizes, on the account
+`Navigation.neighbor` returns, wrapping at both ends. So medium has no detail
+page and no `PageStore` entry at all -- selection is its whole navigation.
+The auto-switch badge is read-only here (the toggle needs the room large and
+extra-large have) and shortens to `⇄ 85%` before it is dropped.
+
+Large and extra-large are master-detail with no pager. The account list is the
+same on both: three rows per window at 344pt, each a three-line button that selects it
 (default: the active account) -- the name, alias and email both, on a line of
 its own, then a `5H` and a `7D` line, each with its bar, percent and countdown
 (the 5h one ticking, the weekly one as `3d 11h`). When the list overflows,

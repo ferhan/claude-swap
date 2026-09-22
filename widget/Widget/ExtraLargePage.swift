@@ -252,57 +252,6 @@ struct SelectedDetail: View {
     }
 }
 
-/// Email, org, alias, kind, status and when it was last measured. Shared by
-/// the extra-large right column and the large detail view -- both are 318pt
-/// wide, so the same four rows fit either way.
-struct AccountFactsGrid: View {
-    let account: Account
-    let context: PageContext
-
-    var body: some View {
-        Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 2) {
-            // Email, org and status get the full width and wrap: all
-            // three run long, and half a column cut them mid-word.
-            GridRow {
-                key("Email"); value(account.email).gridCellColumns(3)
-            }
-            GridRow {
-                key("Org")
-                value(account.organizationName.isEmpty ? "personal" : account.organizationName)
-                    .gridCellColumns(3)
-            }
-            GridRow {
-                key("Alias"); value(account.alias ?? "—")
-                key("Kind"); value(account.kind)
-            }
-            GridRow {
-                key("Status")
-                value(account.active ? "active · \(account.statusText)" : account.statusText)
-                key("Updated")
-                value(account.usageFetchedAt.map {
-                    Format.age(seconds: context.now.timeIntervalSince($0))
-                } ?? "—")
-            }
-        }
-        .font(.system(size: 11.5))
-    }
-
-    private func key(_ text: String) -> some View {
-        Text(text).foregroundStyle(.secondary).lineLimit(1).fixedSize()
-    }
-
-    /// Wraps to a second line rather than cutting: at this width a middle
-    /// truncation turned a long org name into `ferhane...ganization`.
-    private func value(_ text: String) -> some View {
-        Text(text)
-            .foregroundStyle(.primary)
-            .lineLimit(2)
-            .truncationMode(.tail)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
 /// The weekly figures the list rows do not carry: pace against expectation,
 /// when the week runs out, and the spend. Everything time-to-reset was
 /// dropped -- the 7D row already ticks it down.

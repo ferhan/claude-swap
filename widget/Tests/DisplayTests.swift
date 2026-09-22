@@ -107,20 +107,16 @@ final class DisplayTests: XCTestCase {
         XCTAssertEqual(Paging.label(for: pages[1], snapshot: snapshot), "work · details")
     }
 
-    func testMediumOverviewSplitsOthersByThree() throws {
+    func testOnlySmallHasPagerPages() throws {
+        // Medium, large and extra-large navigate with `Navigation`, not the
+        // pager: medium's ‹ › move the selection.
         let snapshot = try golden()
-        XCTAssertEqual(Paging.overviewChunks(for: .medium, snapshot: snapshot).map { $0.map(\.number) }, [[2, 3, 4]])
-        let pages = Paging.pages(for: .medium, snapshot: snapshot)
-        XCTAssertEqual(pages.first, .overview(index: 0, count: 1))
-        XCTAssertEqual(pages.count, 5)
-        XCTAssertEqual(Paging.label(for: pages[0], snapshot: snapshot), "Overview")
-    }
-
-    func testTheAccountListSizesHaveNoPagerPages() throws {
-        // Large and extra-large navigate with `Navigation`, not the pager.
-        let snapshot = try golden()
-        XCTAssertEqual(Paging.pages(for: .large, snapshot: snapshot), [])
-        XCTAssertEqual(Paging.pages(for: .extraLarge, snapshot: snapshot), [])
+        for family in [LayoutFamily.medium, .large, .extraLarge] {
+            XCTAssertEqual(Paging.pages(for: family, snapshot: snapshot), [], "\(family)")
+            XCTAssertTrue(Navigation.usesSelection(family), "\(family)")
+        }
+        XCTAssertFalse(Navigation.usesSelection(.small))
+        // Medium keeps a selection but has room for one account, not a list.
         XCTAssertTrue(Navigation.showsAccountList(.large))
         XCTAssertTrue(Navigation.showsAccountList(.extraLarge))
         XCTAssertFalse(Navigation.showsAccountList(.medium))
@@ -150,9 +146,34 @@ final class DisplayTests: XCTestCase {
         let snapshot = try golden()
         let state = Navigation.select(3, in: NavState(listOffset: 0))
         XCTAssertEqual(state, NavState(mode: .list, selectedAccountNumber: 3, listOffset: 0))
-        // Neither size navigates on a row tap; both survive a resolve as-is.
-        XCTAssertEqual(Navigation.resolve(state, snapshot: snapshot, family: .extraLarge), state)
-        XCTAssertEqual(Navigation.resolve(state, snapshot: snapshot, family: .large), state)
+        // No size navigates on a row tap; all three survive a resolve as-is.
+        for family in [LayoutFamily.medium, .large, .extraLarge] {
+            XCTAssertEqual(Navigation.resolve(state, snapshot: snapshot, family: family), state, "\(family)")
+        }
+    }
+
+    func testMediumArrowsStepTheSelectionAndWrap() throws {
+        let accounts = try golden().orderedAccounts
+        XCTAssertEqual(accounts.map(\.number), [1, 2, 3, 4])
+        XCTAssertEqual(Navigation.neighbor(of: 2, in: accounts, by: 1), 3)
+        XCTAssertEqual(Navigation.neighbor(of: 2, in: accounts, by: -1), 1)
+        XCTAssertEqual(Navigation.neighbor(of: 4, in: accounts, by: 1), 1, "wraps past the last")
+        XCTAssertEqual(Navigation.neighbor(of: 1, in: accounts, by: -1), 4, "wraps before the first")
+        // One account: both arrows land on it again.
+        let one = Array(accounts.prefix(1))
+        XCTAssertEqual(Navigation.neighbor(of: 1, in: one, by: 1), 1)
+        XCTAssertEqual(Navigation.neighbor(of: 1, in: one, by: -1), 1)
+        // An account that has gone steps from the head of the list.
+        XCTAssertEqual(Navigation.neighbor(of: 42, in: accounts, by: 1), 2)
+        XCTAssertNil(Navigation.neighbor(of: 1, in: [], by: 1))
+    }
+
+    func testMediumHasNoDetailModeToStoreOrResolveInto() throws {
+        let snapshot = try golden()
+        let detail = Navigation.openDetail(3, in: NavState())
+        let resolved = Navigation.resolve(detail, snapshot: snapshot, family: .medium)
+        XCTAssertEqual(resolved.mode, .list, "medium shows the selection in place")
+        XCTAssertEqual(resolved.selectedAccountNumber, 3)
     }
 
     func testDetailsOpensTheDetailAndBackReturnsWithTheSelectionKept() throws {
@@ -163,6 +184,7 @@ final class DisplayTests: XCTestCase {
         // Large keeps the detail; extra-large has no detail mode to keep.
         XCTAssertEqual(Navigation.resolve(detail, snapshot: snapshot, family: .large).mode, .detail)
         XCTAssertEqual(Navigation.resolve(detail, snapshot: snapshot, family: .extraLarge).mode, .list)
+        XCTAssertEqual(Navigation.resolve(detail, snapshot: snapshot, family: .medium).mode, .list)
         let back = Navigation.back(detail)
         XCTAssertEqual(back.mode, .list)
         XCTAssertEqual(back.selectedAccountNumber, 3, "the account stays selected")
@@ -171,7 +193,7 @@ final class DisplayTests: XCTestCase {
 
     func testTheAccountListSizesDefaultToTheActiveAccount() throws {
         let snapshot = try golden()
-        for family in [LayoutFamily.large, .extraLarge] {
+        for family in [LayoutFamily.medium, .large, .extraLarge] {
             let resolved = Navigation.resolve(NavState(), snapshot: snapshot, family: family)
             XCTAssertEqual(resolved.selectedAccountNumber, snapshot.activeAccount?.number)
             XCTAssertEqual(resolved.mode, .list)
@@ -181,7 +203,7 @@ final class DisplayTests: XCTestCase {
     func testVanishedSelectionFallsBackToTheListAndTheActiveAccount() throws {
         let snapshot = try golden()
         let stale = NavState(mode: .detail, selectedAccountNumber: 42, listOffset: 0)
-        for family in [LayoutFamily.large, .extraLarge] {
+        for family in [LayoutFamily.medium, .large, .extraLarge] {
             let resolved = Navigation.resolve(stale, snapshot: snapshot, family: family)
             XCTAssertEqual(resolved.mode, .list, "\(family): the detail had nothing left to show")
             XCTAssertEqual(resolved.selectedAccountNumber, 1)

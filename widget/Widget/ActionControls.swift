@@ -9,16 +9,19 @@ import WidgetKit
 struct ActionChip: View {
     let title: String
     let symbol: String
+    /// Medium's right column is 147pt: the chip drops to the small type scale
+    /// there so "Switch to this account" fits whole rather than shortening.
+    var compact = false
 
     var body: some View {
         Label(title, systemImage: symbol)
             .labelStyle(.titleAndIcon)
-            .font(.system(size: 12, weight: .semibold))
+            .font(.system(size: compact ? 10 : 12, weight: .semibold))
             .foregroundStyle(.primary)
             .lineLimit(1)
             .fixedSize()
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+            .padding(.horizontal, compact ? 6 : 8)
+            .padding(.vertical, compact ? 3 : 4)
             .background(Capsule().fill(.primary.opacity(0.1)))
             .overlay(Capsule().stroke(.primary.opacity(0.15), lineWidth: 1))
             .contentShape(Capsule())
@@ -29,11 +32,12 @@ struct ActionChip: View {
 struct ActionNote: View {
     let title: String
     let symbol: String
+    var compact = false
 
     var body: some View {
         Label(title, systemImage: symbol)
             .labelStyle(.titleAndIcon)
-            .font(.system(size: 12, weight: .medium))
+            .font(.system(size: compact ? 10 : 12, weight: .medium))
             .foregroundStyle(.secondary)
             .lineLimit(1)
             .fixedSize()
@@ -51,13 +55,14 @@ struct ActionNote: View {
 struct StartBackendControl: View {
     let context: PageContext
     var short = false
+    var compact = false
 
     var body: some View {
         if context.isBackendStarting {
-            ActionNote(title: "Starting…", symbol: "hourglass")
+            ActionNote(title: "Starting…", symbol: "hourglass", compact: compact)
         } else {
             Link(destination: BackendStart.url) {
-                ActionChip(title: short ? "Start" : "Start backend", symbol: "play.circle")
+                ActionChip(title: short ? "Start" : "Start backend", symbol: "play.circle", compact: compact)
             }
             .accessibilityLabel("Start backend")
         }
@@ -71,24 +76,26 @@ struct StartBackendControl: View {
 struct SwitchControl: View {
     let account: Account
     let context: PageContext
+    /// Medium: the small type scale (see `ActionChip`).
+    var compact = false
 
     var body: some View {
         switch account.switchEligibility(activeNumber: context.snapshot.activeAccountNumber) {
         case .active:
             ActiveMarker()
         case .notSwitchable:
-            ActionNote(title: "Not switchable", symbol: "nosign")
+            ActionNote(title: "Not switchable", symbol: "nosign", compact: compact)
                 .accessibilityLabel("Not switchable: no stored login for this account")
         case .eligible:
             if context.isBackendStale {
                 ViewThatFits(in: .horizontal) {
-                    StartBackendControl(context: context)
-                    StartBackendControl(context: context, short: true)
+                    StartBackendControl(context: context, compact: compact)
+                    StartBackendControl(context: context, short: true, compact: compact)
                 }
             } else {
                 switch context.switchState {
                 case .switching(target: account.number):
-                    ActionNote(title: "Switching…", symbol: "clock")
+                    ActionNote(title: "Switching…", symbol: "clock", compact: compact)
                 case .notApplied(target: account.number):
                     ViewThatFits(in: .horizontal) {
                         notApplied("Switch not applied")
@@ -108,14 +115,14 @@ struct SwitchControl: View {
 
     private func notApplied(_ text: String) -> some View {
         HStack(spacing: 6) {
-            ActionNote(title: text, symbol: "exclamationmark.circle")
+            ActionNote(title: text, symbol: "exclamationmark.circle", compact: compact)
             switchButton("Retry", symbol: "arrow.clockwise")
         }
     }
 
     private func switchButton(_ title: String, symbol: String) -> some View {
         Button(intent: SwitchAccountIntent(number: account.number)) {
-            ActionChip(title: title, symbol: symbol)
+            ActionChip(title: title, symbol: symbol, compact: compact)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Switch to \(account.label)")

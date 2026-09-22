@@ -229,43 +229,18 @@ enum LayoutFamily: String, Sendable, CaseIterable {
 enum Page: Equatable, Sendable {
     /// Small: one account's hero.
     case hero(account: Int)
-    /// Medium/large/extra-large: the overview, split when it does not fit.
-    case overview(index: Int, count: Int)
-    /// Any size: one account's detail.
+    /// Small: one account's detail.
     case detail(account: Int)
 }
 
 enum Paging {
-    /// Compact rows beside the medium hero.
-    static let mediumRowsPerPage = 3
-
-    /// Overview first (or one hero per account on small), then one detail
-    /// page per account, so ‹ › reaches everything.
+    /// Small is the one size left that pages: a hero and a detail per account,
+    /// so ‹ › reaches everything. Every other size keeps a selection instead
+    /// (see `Navigation`).
     static func pages(for family: LayoutFamily, snapshot: Snapshot) -> [Page] {
-        let accounts = snapshot.orderedAccounts
-        switch family {
-        case .small:
-            return accounts.flatMap { [Page.hero(account: $0.number), .detail(account: $0.number)] }
-        case .large, .extraLarge:
-            // Master-detail, no pager: see `Navigation`.
-            return []
-        case .medium:
-            let count = overviewChunks(for: family, snapshot: snapshot).count
-            return (0..<count).map { Page.overview(index: $0, count: count) }
-                + accounts.map { .detail(account: $0.number) }
-        }
-    }
-
-    /// The accounts on each overview page: the non-active ones beside the
-    /// medium hero. Large and extra-large are master-detail and split their
-    /// rows with `Navigation.listChunks` instead.
-    static func overviewChunks(for family: LayoutFamily, snapshot: Snapshot) -> [[Account]] {
-        let accounts = snapshot.orderedAccounts
-        guard family == .medium else { return [accounts] }
-        let others = accounts.filter { !$0.active }
-        guard !others.isEmpty else { return [[]] }
-        return stride(from: 0, to: others.count, by: mediumRowsPerPage).map {
-            Array(others[$0..<min($0 + mediumRowsPerPage, others.count)])
+        guard family == .small else { return [] }
+        return snapshot.orderedAccounts.flatMap {
+            [Page.hero(account: $0.number), .detail(account: $0.number)]
         }
     }
 
@@ -281,8 +256,6 @@ enum Paging {
             let accounts = snapshot.orderedAccounts
             let position = (accounts.firstIndex { $0.number == number } ?? 0) + 1
             return "\(position)/\(accounts.count)"
-        case .overview(let index, let count):
-            return count > 1 ? "Overview \(index + 1)/\(count)" : "Overview"
         case .detail(let number):
             return "\(snapshot.account(number: number)?.label ?? "#\(number)") · details"
         }
