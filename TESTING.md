@@ -60,9 +60,15 @@ backend should delete `~/Library/LaunchAgents/com.cswap.auto.plist` and exit 0;
 `autoswitch.enabled` says. Kill a TUI with `kill -9` instead and the result
 must be the same — a dead surface's lock is released by the kernel.
 
-**Self-retirement has never been run live against launchd**; it is covered by
-unit tests with stubbed `launch_agent`. If something is broken, it is most
-likely here.
+Self-retirement has been observed live: the unified log shows launchd's
+`service inactive: com.cswap.auto` ~30s after a start with no surface open:
+
+```bash
+/usr/bin/log show --last 1h --predicate 'eventMessage CONTAINS "com.cswap.auto"' --style compact
+```
+
+(`/usr/bin/log`, not `log` — zsh has a builtin of that name.) A placed widget
+changes this; see §6.
 
 ### Confirm it is actually ticking
 
@@ -227,7 +233,50 @@ What to check:
 - it is **view-only**: no switching, adding or removing. That is a sandbox
   consequence, not an omission.
 - with the backend stopped, the snapshot goes stale and the widget shows old
-  data. That is expected — only the backend publishes it.
+  data. That is expected — only the backend publishes it. A placed widget
+  now keeps the backend up (next section), so this should only happen when
+  no widget is placed or the host app cannot answer.
+
+### A placed widget keeps the backend alive
+
+```bash
+~/Applications/ClaudeSwap.app/Contents/MacOS/ClaudeSwap --placed-widgets   # {"count": N}
+```
+
+1. Place a widget. Close every TUI and quit the menu bar.
+2. After ~35s: `.venv/bin/cswap service status` still shows it running, the
+   plist is still in `~/Library/LaunchAgents/`, and
+   `~/Library/Logs/com.cswap.auto.err` has one line
+   `backend: 1 widget(s) placed; staying up without a surface`.
+3. `snapshot.json` keeps being rewritten every ~60s (`ls -l`).
+4. Remove the widget. Within ~5 minutes (the answer is cached) the backend
+   retires; the `.err` log gains `backend: no widgets placed`.
+5. Login: with a widget placed, log out and in (no surface opened). The
+   backend should be running (`RunAtLoad`), and stay past the 30s grace. If
+   it retired instead, the `.err` line says whether the app answered
+   "unknown" that early in the session.
+
+Without the app installed, `.err` shows `no widget host app at …` once and
+the backend retires as before.
+
+### The auto-switch toggle
+
+The widget drops `autoswitch-<epochMillis>.json` in
+`~/.claude-swap-backup/widget-requests/` (created 0700 by the backend). To
+test the backend half without the widget:
+
+```bash
+d=~/.claude-swap-backup/widget-requests
+printf '{"autoswitch":{"enabled":true},"at":"%s"}' "$(date -u +%FT%TZ)" > "$d/.tmp"
+mv "$d/.tmp" "$d/autoswitch-$(($(date +%s)*1000)).json"
+```
+
+Within ~1s the file is gone, `cswap config get autoswitch.enabled` is
+`true`, `.err` has `widget: autoswitch.enabled -> true (requested …)`, and
+`snapshot.json`'s `autoswitch.enabled` follows within a tick's duration.
+Also check: two files at once → the larger `epochMillis` wins; a garbage
+file is deleted and changes nothing; a dotfile is left alone. With the
+backend stopped, a dropped file waits and is applied when it next starts.
 
 Rebuild / remove:
 
@@ -245,7 +294,9 @@ strays with `pluginkit -r <path>`.
 
 ## Known gaps — expect these, they are not regressions
 
-- **Backend self-retirement was never run live.** Highest-risk area.
+- **Placed-widget keep-alive and the request directory have not been run
+  against the real widget/host app** — unit tests stub the subprocess and
+  the files.
 - **Every rumps-bound menu bar path is untested.** `MenuBarApp` is defined
   inside `run()` and needs a live NSApp, so there is no harness. The pure
   helpers it composes are tested; the wiring is reviewed, not executed.

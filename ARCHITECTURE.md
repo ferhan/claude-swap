@@ -110,6 +110,7 @@ version, and none should be added.
 | usage store | measured state, atomic fetch claims | backend | all |
 | `settings.json` | policy (`autoswitch.*`) | any surface | backend |
 | `snapshot.json` | display projection | backend | widget |
+| `widget-requests/` | auto on/off requests from the widget | widget | backend |
 | JSONL event stream | engine activity | backend | TUI, menu bar |
 
 This is deliberate. Files survive a crash on either side, need no handshake,
@@ -276,7 +277,7 @@ agent runs `cswap auto --json --backend`.
 
 ### Backend lifetime
 
-The backend runs exactly while some surface is open.
+The backend runs exactly while some surface is open, or a widget is placed.
 
 1. A surface (TUI, or the menu bar app itself) takes the **lifecycle lock**
    (`<backup>/.lifecycle.lock`), registers itself — a lock file
@@ -299,6 +300,26 @@ The backend runs exactly while some surface is open.
    waiting on `launchctl`. The job's record stays loaded but idle until
    logout, or until the next surface's install boots it out and bootstraps.
 
+4. **A placed widget counts as a viewer.** It cannot hold a surface lock —
+   WidgetKit wakes the extension only to draw — so when no surface is live
+   the backend asks the widget's host app: `~/Applications/ClaudeSwap.app/
+   Contents/MacOS/ClaudeSwap --placed-widgets` prints `{"count": N}` and
+   exits 0 (`launch_agent.PlacedWidgets`; the path is spelled once, in
+   `widget_host_executable`). `count > 0` keeps the backend **and its
+   plist**. Missing app, timeout (10s), non-zero exit or unparsable output
+   read as 0, so it retires exactly as before; each distinct answer is logged
+   once to `com.cswap.auto.err`. The answer is cached for 5 minutes, so
+   removing the last widget retires the backend within ~5 minutes, and the
+   app is spawned at most once per 5 minutes. It is asked outside the
+   lifecycle lock (it can take seconds; opening surfaces wait on that lock),
+   and the surfaces are re-checked under the lock before the plist goes.
+5. **Consequence: a placed widget brings the backend back at login.** The
+   plist stays, and it carries `RunAtLoad: true`, so launchd starts it at the
+   next login with no surface involved. After the 30s grace it asks the app
+   again; if the widget is still placed it stays. If the app cannot answer
+   that early in the session, the answer is unknown, read as 0, and the
+   backend retires — the next surface brings it back.
+
 Races: registration and the retire check are serialized by the lifecycle
 lock. A surface that registers after a retire sees no plist and reinstalls;
 a retire that runs after a registration sees the surface and stays. The grace
@@ -311,6 +332,27 @@ to stderr and exits 0, not 1: under `KeepAlive: {SuccessfulExit: false}` a
 failure would be relaunched every ~10s for as long as that loop runs. The
 next surface to open sees it not running and starts it again. A hand-run
 `cswap auto` refused the same way still exits 1.
+
+#### Widget requests
+
+The widget's one write path is `<backup>/widget-requests/` (the sandbox
+grants a read-write exception on that directory only). It drops
+`autoswitch-<epochMillis>.json` — temp file then rename, temps start with
+`.` — containing `{"autoswitch": {"enabled": bool}, "at": "<ISO8601>"}`.
+
+The backend (`--backend` only; `widget_requests.py`) creates the directory
+0700 at startup, since the sandboxed widget cannot, and polls it every 1s on
+its own thread — not per tick, because the engine can sleep for minutes or
+hours. Per pass it applies the **newest** valid request (largest
+`epochMillis`) through `settings.set_setting`, the writer behind `cswap
+config set autoswitch.enabled`, deletes every non-dot file it looked at,
+valid or not, and ignores dotfiles. A change is logged as one line to
+`com.cswap.auto.err` and followed by `engine.wake()`: the tick re-reads
+settings and republishes the snapshot, so the widget's optimistic state
+converges within the tick's duration (seconds; longer if a tick is already
+mid-fetch). A request matching the current setting is consumed silently.
+Requests made while no backend runs wait in the directory and are applied at
+startup, before the first tick.
 
 The menu bar agent is a surface, not the backend, and outlives Quit: its plist
 stays, so it returns at login. *Open at Login* in its menu deletes or rewrites
@@ -379,7 +421,11 @@ beat the 60s timeline, and the only relief from "another surface switched and
 the widget hasn't noticed yet" that does not require shipping a resident
 helper.
 
-Everything that mutates state stays in the TUI, the menu bar and the CLI. Do
+One exception exists: the auto-switch toggle, which writes a request file
+the backend applies (see [Widget requests](#widget-requests)). It flips one
+policy boolean; it does not touch accounts, the Keychain or `~/.claude.json`.
+
+Everything else that mutates state stays in the TUI, the menu bar and the CLI. Do
 **not** grow the stub host app into a second front end — it exists only because
 an extension cannot ship standalone.
 
@@ -407,7 +453,8 @@ Built and verified:
   tests on both sides
 - the widget: decoder, views, golden decode test, entitlements, signed build
 - the backend, started by the surfaces and retired by itself when the last
-  one closes; `autoswitch.enabled`, per-tick settings reload, snapshot
+  one closes (observed live against launchd: `service inactive` in the
+  unified log ~30s after a surface-less start); `autoswitch.enabled`, per-tick settings reload, snapshot
   published each tick
 - the **singleton engine lock**, and both surfaces deciding from it rather
   than from the launchd label — this surface owns the engine / the backend
@@ -430,7 +477,8 @@ Not built:
 
 Untested:
 
-- the backend's self-retirement against a live launchd (unit-tested only)
+- placed-widget keep-alive and the widget request directory against the
+  real host app and widget (unit-tested with the subprocess and files stubbed)
 - whether `temporary-exception` passes real notarization (the reasoning is
   sound — it is not profile-gated, and notarization is automated scanning
   rather than the human review that scrutinizes these — but it is unproven
