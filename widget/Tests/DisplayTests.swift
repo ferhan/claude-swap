@@ -214,6 +214,84 @@ final class DisplayTests: XCTestCase {
         XCTAssertEqual(decoded, state)
     }
 
+    // MARK: - Trend span
+
+    private func snapshot(historyAges ages: [[TimeInterval]], now: Date) throws -> Snapshot {
+        let iso = ISO8601DateFormatter()
+        let accounts = ages.enumerated().map { index, samples -> String in
+            let history = samples.map { #"{"t":"\#(iso.string(from: now.addingTimeInterval(-$0)))","pct":50}"# }
+            return """
+            {"number":\(index + 1),"email":"a\(index)@example.com","organizationName":"","organizationUuid":"",
+             "isOrganization":false,"active":\(index == 0),"kind":"oauth","switchable":true,"usageStatus":"ok",
+             "usage":{"fiveHour":{"pct":50,"resetsAt":null,"history":[\(history.joined(separator: ","))]}}}
+            """
+        }
+        let json = """
+        {"schemaVersion":1,"takenAt":"\(iso.string(from: now))","activeAccountNumber":1,
+         "accounts":[\(accounts.joined(separator: ","))]}
+        """
+        return try Snapshot.decode(Data(json.utf8))
+    }
+
+    func testSpanZoomsToShortHistoryWithAOneHourFloor() throws {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let span = Trend.span(try snapshot(historyAges: [[40 * 60, 60, 0]], now: now), now: now)
+        XCTAssertEqual(span.duration, Trend.minSpan)
+        XCTAssertEqual(span.covered, 40 * 60)
+        XCTAssertEqual(span.caption, "last 40m")
+        XCTAssertEqual(span.axisLabels, ["-1h", "-30m", "now"])
+    }
+
+    func testSpanFollowsTheOldestSampleAcrossAccounts() throws {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let span = Trend.span(try snapshot(historyAges: [[2 * 3_600], [6 * 3_600, 0]], now: now), now: now)
+        XCTAssertEqual(span.start, now.addingTimeInterval(-6 * 3_600))
+        XCTAssertEqual(span.caption, "last 6h")
+        XCTAssertEqual(span.axisLabels, ["-6h", "-3h", "now"])
+    }
+
+    func testSpanCapsAt24h() throws {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        // The 30h sample is outside the window; the 23h50m one is the oldest kept.
+        let span = Trend.span(try snapshot(historyAges: [[30 * 3_600, 23 * 3_600 + 50 * 60]], now: now), now: now)
+        XCTAssertEqual(span.caption, "last 24h")
+        XCTAssertEqual(span.axisLabels[1], "-12h")
+        // No history at all: the full 24h.
+        let empty = Trend.span(try snapshot(historyAges: [[]], now: now), now: now)
+        XCTAssertEqual(empty.duration, Trend.maxSpan)
+    }
+
+    func testSpanFormatting() {
+        XCTAssertEqual(Format.span(seconds: 20), "1m")
+        XCTAssertEqual(Format.span(seconds: 40 * 60), "40m")
+        XCTAssertEqual(Format.span(seconds: 3_600), "1h")
+        XCTAssertEqual(Format.span(seconds: 90 * 60), "1h 30m")
+        XCTAssertEqual(Format.span(seconds: 5 * 3_600 + 40 * 60), "5h 40m")
+        XCTAssertEqual(Format.span(seconds: 11.6 * 3_600), "12h")
+    }
+
+    func testSwitchMarkersAreClippedToTheSpan() throws {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let base = try snapshot(historyAges: [[40 * 60, 0]], now: now)
+        let iso = ISO8601DateFormatter()
+        func at(_ age: TimeInterval) -> String { iso.string(from: now.addingTimeInterval(-age)) }
+        // Axis is the last hour: the 30m-ago switch shows, the 3h-ago one does not.
+        let json = """
+        {"schemaVersion":1,"takenAt":"\(at(0))","activeAccountNumber":1,"accounts":[],
+         "autoswitch":{"enabled":true,"threshold":90,"nextCandidateNumber":null,
+           "switches":[{"at":"\(at(3 * 3_600))","from":1,"to":2},{"at":"\(at(30 * 60))","from":1,"to":2},
+                       {"at":"\(at(10 * 60))","from":7,"to":1}]}}
+        """
+        let events = try Snapshot.decode(Data(json.utf8)).autoswitch
+        let merged = Snapshot(schemaVersion: 1, takenAt: now, activeAccountNumber: 1,
+                              accounts: base.accounts, autoswitch: events)
+        let markers = Trend.switchMarkers(merged, now: now)
+        XCTAssertEqual(markers.map(\.date), [now.addingTimeInterval(-30 * 60), now.addingTimeInterval(-10 * 60)])
+        XCTAssertEqual(markers.first?.pct, 50)
+        // No history for the "from" account: the marker sits on the threshold.
+        XCTAssertEqual(markers.last?.pct, 90)
+    }
+
     func testNormalizedWraps() {
         XCTAssertEqual(Paging.normalized(-1, count: 5), 4)
         XCTAssertEqual(Paging.normalized(5, count: 5), 0)

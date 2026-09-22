@@ -236,9 +236,10 @@ struct TrendPanel: View {
     private static let palette: [Color] = [.blue, .purple, .teal, .pink, .indigo, .brown, .mint]
 
     var body: some View {
+        let span = Trend.span(context.snapshot, now: context.now)
         VStack(alignment: .leading, spacing: 5) {
             HStack {
-                Text("5h usage · last 24h").font(.system(size: 11, weight: .bold))
+                Text("5h usage · \(span.caption)").font(.system(size: 11, weight: .bold))
                 Spacer()
                 HStack(spacing: 8) {
                     Label("\(Format.pct(context.threshold)) threshold", systemImage: "line.diagonal")
@@ -248,13 +249,13 @@ struct TrendPanel: View {
                 .foregroundStyle(.secondary)
             }
             if Trend.hasData(context.snapshot, now: context.now) {
-                chart
+                chart(span)
                 HStack {
-                    Text("-24h")
+                    Text(span.axisLabels[0])
                     Spacer()
-                    Text("-12h")
+                    Text(span.axisLabels[1])
                     Spacer()
-                    Text("now")
+                    Text(span.axisLabels[2])
                 }
                 .font(.system(size: 8.5))
                 .foregroundStyle(.secondary)
@@ -287,9 +288,8 @@ struct TrendPanel: View {
 
     private func isEmphasized(_ account: Account) -> Bool { account.number == emphasized }
 
-    private var chart: some View {
-        let start = context.now.addingTimeInterval(-Trend.span)
-        return Chart {
+    private func chart(_ span: Trend.Span) -> some View {
+        Chart {
             ForEach(series, id: \.account.number) { line in
                 ForEach(line.points, id: \.time) { point in
                     LineMark(x: .value("Time", point.time), y: .value("5h %", point.pct),
@@ -310,7 +310,7 @@ struct TrendPanel: View {
                     .foregroundStyle(Color.primary)
             }
         }
-        .chartXScale(domain: start...context.now)
+        .chartXScale(domain: span.start...span.end)
         .chartYScale(domain: 0...100)
         .chartXAxis(.hidden)
         .chartYAxis(.hidden)

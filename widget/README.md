@@ -241,6 +241,11 @@ scroll. The right column shows the selected account's weekly pace, its details
 and windows, and the 5h trend with its line emphasized. A tap that misses every
 control reloads the widget rather than opening the stub host app.
 
+The trend's time axis spans the history actually held: from the oldest sample
+(at most 24h back) to now, never narrower than an hour, with the caption and
+axis hints following it (`last 40m`, `last 6h`, `last 24h`). Switch markers
+outside the axis are not drawn.
+
 The `autoswitch` block and 5h `history` are additive and optional: without them
 the threshold defaults to 90%, next-up is omitted and the extra-large trend
 panel says so. `Tests/Fixtures/snapshot_autoswitch.json` is a hand-written
