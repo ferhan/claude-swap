@@ -56,14 +56,30 @@ notarization requires."
 
 install_widget() {
     preflight "Apple Development"
+    # A build number that changes on every install. chronod (the widget
+    # timeline daemon) caches a widget's descriptor keyed on its unchanged
+    # bundle version, so rebuilding the widget's own definition (e.g. from
+    # StaticConfiguration to AppIntentConfiguration) without bumping this
+    # left chronod requesting timelines against the stale, cached shape.
+    BUILD_NUMBER="$(date +%Y%m%d%H%M%S)"
     xcodebuild -project CswapWidget.xcodeproj -scheme CswapWidgetHost \
-        -configuration Debug -derivedDataPath "$BUILD/dd" build
+        -configuration Debug -derivedDataPath "$BUILD/dd" \
+        CURRENT_PROJECT_VERSION="$BUILD_NUMBER" build
     BUILT="$BUILD/dd/Build/Products/Debug/CswapWidgetHost.app"
 
     # xcodebuild registers whatever it just built. Two registered copies of one
     # extension bundle id and pkd keeps only the last it saw, so drop the build
-    # directory's copy before registering the installed one.
+    # directory's copy before registering the installed one. Also drop any
+    # stale copy left behind under a *different* DerivedData root (e.g. from
+    # Xcode.app, or an old CswapWidget-* hash) -- same failure mode, just not
+    # this run's own build directory.
     "$LSREGISTER" -u "$BUILT"
+    for stale in "$HOME"/Library/Developer/Xcode/DerivedData/CswapWidget-*/Build/Products/*/CswapWidgetHost.app; do
+        [[ -d "$stale" ]] || continue
+        # Best-effort: -u fails if it was never registered (or already was
+        # unregistered), which isn't a problem worth stopping the install for.
+        "$LSREGISTER" -u "$stale" || true
+    done
     rm -rf "$DEST"
     mkdir -p "$(dirname "$DEST")"
     ditto "$BUILT" "$DEST"
@@ -81,6 +97,12 @@ A copy built by Xcode.app can hold the registration instead; unregister it with
     $LSREGISTER -u <that .app>
 and run this again."
     pluginkit -m -v -i "$APPEX_ID"
+
+    # chronod caches widget descriptors in memory, keyed on bundle version --
+    # restart it so it re-reads the one just installed instead of serving a
+    # cached shape from before. It relaunches on its own.
+    killall chronod 2>/dev/null || true
+
     echo "Installed $DEST"
     echo "Add it from the widget gallery: right-click the desktop > Edit Widgets."
 }
@@ -101,9 +123,10 @@ holding it -- find it with: pluginkit -m -v -i $APPEX_ID"
 release() {
     preflight "Developer ID Application"
     rm -rf "$BUILD/CswapWidget.xcarchive" "$BUILD/export"
+    BUILD_NUMBER="$(date +%Y%m%d%H%M%S)"
     xcodebuild -project CswapWidget.xcodeproj -scheme CswapWidgetHost \
         -configuration Release -archivePath "$BUILD/CswapWidget.xcarchive" \
-        -allowProvisioningUpdates archive
+        -allowProvisioningUpdates CURRENT_PROJECT_VERSION="$BUILD_NUMBER" archive
 
     # Generated rather than committed: it carries the Team ID, and build/ is
     # gitignored.

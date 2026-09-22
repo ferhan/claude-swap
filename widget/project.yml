@@ -32,6 +32,11 @@ settings:
     CODE_SIGN_STYLE: Automatic
     # Required for Developer ID / notarization, which is how this ships.
     ENABLE_HARDENED_RUNTIME: YES
+    # Overridden per build by build-widget so every install/release gets a
+    # unique CFBundleVersion; this is only the fallback for a plain
+    # xcodebuild invocation. Host and extension must match or embedding
+    # validation fails, so both Info.plists key off this one setting.
+    CURRENT_PROJECT_VERSION: "1"
 
 targets:
   # Stub. WidgetKit extensions cannot ship standalone, so the widget needs a
@@ -56,6 +61,8 @@ targets:
         CFBundleDisplayName: cswap
         CFBundleName: cswap
         LSApplicationCategoryType: public.app-category.developer-tools
+        # Must match the extension's -- see CURRENT_PROJECT_VERSION above.
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
     dependencies:
       - target: CswapWidgetExtension
         embed: true
@@ -81,6 +88,8 @@ targets:
       path: Widget/Info.plist
       properties:
         CFBundleDisplayName: cswap
+        # Must match the host's -- see CURRENT_PROJECT_VERSION above.
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
 
