@@ -260,10 +260,16 @@ struct SwitchAccountIntent: AppIntent {
 
     func perform() async throws -> some IntentResult {
         let now = Date()
-        // A stale snapshot means no backend to apply the request: the button
-        // is not drawn then, but a tap on an older rendering can still land.
-        let backendUp = SnapshotFile.load().map { !$0.isBackendStale(now: now) } ?? false
-        let delivered = backendUp
+        // A stale snapshot means no backend to apply the request, and the
+        // backend refuses a slot the widget may not switch to (disabled, or
+        // without a backup). Neither is drawn as a button, but a tap on an
+        // older rendering can still land.
+        let askable = SnapshotFile.load().map { snapshot in
+            !snapshot.isBackendStale(now: now)
+                && snapshot.accounts.first { $0.number == number }?
+                    .switchEligibility(activeNumber: snapshot.activeAccountNumber) == .eligible
+        } ?? false
+        let delivered = askable
             && (try? SwitchRequest.write(to: number, at: now, into: SnapshotFile.requestsDirectory)) != nil
         SwitchStore.set(PendingSwitch(target: number, requestedAt: now, delivered: delivered))
         if delivered {

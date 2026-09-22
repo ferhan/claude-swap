@@ -60,7 +60,11 @@ struct BrandTitle: View {
                 .foregroundStyle(.tint)
                 .widgetAccentable()
             Text("ClaudeSwap").font(.system(size: 14, weight: .bold)).fixedSize()
-            if context.isBackendStale {
+            if case .failed = context.startState {
+                // The control says "Start failed · Retry" itself; "Backend
+                // stopped" beside it would only repeat the icon and the news.
+                StartBackendControl(context: context)
+            } else if context.isBackendStale {
                 // "Backend stopped" and the control to start it. The wording
                 // shortens, then goes, before the control is cut.
                 let age = context.now.timeIntervalSince(context.snapshot.takenAt)

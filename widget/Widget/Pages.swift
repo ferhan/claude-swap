@@ -35,7 +35,8 @@ struct CswapWidgetView: View {
         if Navigation.usesSelection(family) {
             let context = PageContext(snapshot: snapshot, now: entry.date, family: family, pagerLabel: "",
                                       pendingToggle: entry.pendingToggle, pendingSwitch: entry.pendingSwitch,
-                                      backendStartedAt: entry.backendStartedAt)
+                                      backendStartedAt: entry.backendStartedAt,
+                                      backendFailure: entry.backendFailure)
             let nav = Navigation.resolve(entry.nav, snapshot: snapshot, family: family)
             switch family {
             case .extraLarge: ExtraLargePage(context: context, nav: nav)
@@ -48,7 +49,8 @@ struct CswapWidgetView: View {
             let context = PageContext(snapshot: snapshot, now: entry.date, family: family,
                                       pagerLabel: Paging.label(forAccount: number, snapshot: snapshot),
                                       pendingToggle: entry.pendingToggle, pendingSwitch: entry.pendingSwitch,
-                                      backendStartedAt: entry.backendStartedAt)
+                                      backendStartedAt: entry.backendStartedAt,
+                                      backendFailure: entry.backendFailure)
             SmallPage(context: context, accountNumber: number)
         }
     }
@@ -63,6 +65,7 @@ struct PageContext {
     var pendingToggle: PendingToggle?
     var pendingSwitch: PendingSwitch?
     var backendStartedAt: Date?
+    var backendFailure: BackendStart.FailureNote?
 
     var threshold: Double { snapshot.threshold }
     var isBackendStale: Bool { snapshot.isBackendStale(now: now) }
@@ -83,9 +86,11 @@ struct PageContext {
         AccountSwitch.resolve(activeNumber: snapshot.activeAccountNumber, pending: pendingSwitch, now: now)
     }
 
-    /// The host app was asked to start the backend moments ago.
-    var isBackendStarting: Bool {
-        BackendStart.isStarting(markerAt: backendStartedAt, snapshotStale: isBackendStale, now: now)
+    /// What the Start control draws: a start the host app was asked for
+    /// moments ago, or the failure it left behind.
+    var startState: BackendStart.StartState {
+        BackendStart.state(markerAt: backendStartedAt, failure: backendFailure,
+                           snapshotStale: isBackendStale, now: now)
     }
 
     func isNext(_ account: Account) -> Bool { snapshot.nextCandidate?.number == account.number }

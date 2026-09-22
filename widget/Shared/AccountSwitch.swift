@@ -52,17 +52,23 @@ enum SwitchEligibility: Equatable, Sendable {
     case active
     /// No stored credentials/config backup: `cswap switch` would refuse it.
     case notSwitchable
+    /// Disabled: the backend refuses a widget switch to it.
+    case disabled
 }
 
 extension Account {
-    /// The same rule `cswap switch N` applies (`switch_to` in
-    /// `src/claude_swap/switcher.py`): the slot must hold a usable backup
-    /// (`switchable`). A disabled slot is only held out of *automatic*
-    /// rotation and stays a valid explicit target, and `kind` is not checked
-    /// -- an API-key slot with a backup switches like any other.
+    /// The rule the backend applies to a widget request
+    /// (`apply_switch_request` in `src/claude_swap/widget_requests.py`): the
+    /// slot must hold a usable backup (`switchable`) and must not be
+    /// disabled. `cswap switch N` does take a disabled slot, but the backend
+    /// refuses one asked for from the widget -- a tap on a dimmed row is far
+    /// likelier a slip -- so offering it here would only ever end in "Switch
+    /// not applied". `kind` is not checked: an API-key slot with a backup
+    /// switches like any other.
     func switchEligibility(activeNumber: Int?) -> SwitchEligibility {
         if active || number == activeNumber { return .active }
-        return switchable ? .eligible : .notSwitchable
+        if !switchable { return .notSwitchable }
+        return isDisabled ? .disabled : .eligible
     }
 }
 

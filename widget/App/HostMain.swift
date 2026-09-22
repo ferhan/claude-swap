@@ -1,4 +1,5 @@
 import AppKit
+import os
 import WidgetKit
 
 /// Entry point. Three ways in:
@@ -6,8 +7,11 @@ import WidgetKit
 /// - `--placed-widgets`: answers one question for the backend and exits
 ///   without ever creating an NSApplication.
 /// - `claudeswap://start-backend` (the widget's Start control): runs
-///   `cswap service start` and quits. No window; `LSUIElement` means no Dock
-///   icon either.
+///   `cswap service start` and quits. **Nothing is ever drawn on this path**
+///   -- no window, no alert -- because the tap came from a widget and the
+///   answer belongs in the widget: the outcome goes into the markers
+///   `BackendStart` defines, and the detail into `.host.log` beside them.
+///   `LSUIElement` means no Dock icon either.
 /// - A plain launch (Finder, `open -a`): the info window, with a Dock icon for
 ///   as long as it is open.
 @main
@@ -27,22 +31,43 @@ enum HostMain {
 
 @MainActor
 final class HostDelegate: NSObject, NSApplicationDelegate {
+    /// How long a launch that says it is plain waits for a URL before it
+    /// opens the info window.
+    ///
+    /// `launchIsDefaultUserInfoKey` is missing on a cold URL launch, which
+    /// reads as "plain", and the URL event can arrive after
+    /// `applicationDidFinishLaunching` anyway. Deciding at that moment is
+    /// what put the info window in front of a Start tap -- the backend did
+    /// start, the window just made it look like nothing had happened.
+    private static let urlGrace: TimeInterval = 1
+
     private var window: NSWindow?
     private var starting = false
+    private var handledURL = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // False when LaunchServices launched us to open a URL. The URL itself
-        // may arrive just before or just after this call.
         let plainLaunch = notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? Bool ?? true
-        if plainLaunch && !starting { showInfoWindow() }
+        let arguments = CommandLine.arguments.dropFirst().joined(separator: " ")
+        HostLog.write("launch: plainLaunch=\(plainLaunch) args=[\(arguments)]")
+        guard plainLaunch else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.urlGrace) { [weak self] in
+            guard let self, !self.handledURL, !self.starting else { return }
+            HostLog.write("plain launch: info window")
+            self.showInfoWindow()
+        }
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        if urls.contains(where: BackendStart.isStartURL) {
-            startBackend()
-        } else {
-            showInfoWindow()
+        handledURL = true
+        guard urls.contains(where: BackendStart.isStartURL) else {
+            // The info window is for a plain launch only. An unknown URL is
+            // nothing to draw about, so there is nothing left to do.
+            HostLog.write("url ignored: \(urls.map(\.absoluteString).joined(separator: " "))")
+            NSApp.terminate(nil)
+            return
         }
+        HostLog.write("url: start-backend")
+        startBackend()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -67,21 +92,47 @@ final class HostDelegate: NSObject, NSApplicationDelegate {
 
     private func finish(_ result: Result<Void, BackendStarter.Failure>) {
         starting = false
+        // No alert, ever: a tap on a widget must not summon a window. The
+        // widget draws "Start failed · Retry" from the marker the starter
+        // left, and this reload is what makes it do so.
         WidgetCenter.shared.reloadAllTimelines()
-        if case .failure(let failure) = result {
-            // An alert, not a notification: a notification needs the user to
-            // have granted permission first -- the request would itself be the
-            // first thing they see -- and can be silenced. A failed start is
-            // rare and needs acting on.
-            NSApp.activate()
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = "ClaudeSwap could not start the backend"
-            alert.informativeText = failure.message
-                + "\n\nRun `cswap service start` in a terminal for details."
-            alert.runModal()
-        }
         if window == nil { NSApp.terminate(nil) }
+    }
+}
+
+/// The host app's log: a line per launch, appended to `.host.log` in the
+/// request directory and mirrored to `os_log` (subsystem `com.cswap.widget`).
+/// The app has no window on the Start path, so without this a start that goes
+/// wrong leaves nothing behind to read.
+enum HostLog {
+    private static let logger = Logger(subsystem: "com.cswap.widget", category: "host")
+    /// Trimmed to the last 200 lines once it passes this.
+    private static let maxBytes = 64 * 1024
+
+    static func write(_ message: String) {
+        logger.log("\(message, privacy: .public)")
+        let line = "\(Date().formatted(Date.ISO8601FormatStyle())) [\(getpid())] \(message)\n"
+        let url = SnapshotFile.requestsDirectory.appending(path: BackendStart.hostLogName)
+        guard let data = line.data(using: .utf8) else { return }
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            // 0600 like everything else the widget drops here.
+            FileManager.default.createFile(atPath: url.path, contents: data,
+                                           attributes: [.posixPermissions: 0o600])
+        }
+        trim(url)
+    }
+
+    private static func trim(_ url: URL) {
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int,
+              size > maxBytes,
+              let text = try? String(contentsOf: url, encoding: .utf8) else { return }
+        let tail = text.split(separator: "\n", omittingEmptySubsequences: false).suffix(200)
+        _ = try? RequestDrop.write(Data(tail.joined(separator: "\n").utf8), name: BackendStart.hostLogName,
+                                   into: url.deletingLastPathComponent())
     }
 }
 
@@ -96,6 +147,7 @@ enum BackendStarter {
     static func run() -> Result<Void, Failure> {
         let fileManager = FileManager.default
         let marker = SnapshotFile.backendStartMarker
+        let failureMarker = SnapshotFile.backendFailureMarker
         // The marker tells the widget a start is under way ("Starting…"). The
         // backend normally creates the request directory; before its first
         // run there is none, so make it the way the backend does (0700).
@@ -104,21 +156,39 @@ enum BackendStarter {
         let startedAt = Date()
         _ = try? RequestDrop.write(BackendStart.marker(at: startedAt), name: BackendStart.markerName,
                                    into: SnapshotFile.requestsDirectory)
+        // Whatever an earlier attempt left: this one supersedes it.
+        try? fileManager.removeItem(at: failureMarker)
         WidgetCenter.shared.reloadAllTimelines()
 
         let result = execute()
         switch result {
-        case .failure:
-            try? fileManager.removeItem(at: marker)
+        case .failure(let failure):
+            HostLog.write("start failed after \(elapsed(since: startedAt)): \(failure.message)")
+            _ = try? RequestDrop.write(
+                BackendStart.failureMarker(.init(failedAt: Date(), reason: failure.message)),
+                name: BackendStart.failureName, into: SnapshotFile.requestsDirectory)
         case .success:
             // The caller reloads the widget next. Give the backend a few
             // seconds to publish, so that reload draws the fresh snapshot.
+            var published = false
             for _ in 0..<10 {
-                if let taken = SnapshotFile.load()?.takenAt, taken > startedAt.addingTimeInterval(-1) { break }
+                if let taken = SnapshotFile.load()?.takenAt, taken > startedAt.addingTimeInterval(-1) {
+                    published = true
+                    break
+                }
                 Thread.sleep(forTimeInterval: 0.5)
             }
+            HostLog.write("start ok after \(elapsed(since: startedAt))"
+                          + (published ? ", snapshot published" : ", no fresh snapshot yet"))
         }
+        // Either way the start is over: a marker left behind would only keep
+        // the widget on "Starting…" until it aged out.
+        try? fileManager.removeItem(at: marker)
         return result
+    }
+
+    private static func elapsed(since start: Date) -> String {
+        String(format: "%.1fs", Date().timeIntervalSince(start))
     }
 
     private static func execute() -> Result<Void, Failure> {
@@ -141,6 +211,7 @@ enum BackendStarter {
         }
         defer { try? output.close() }
 
+        HostLog.write("running \((command + ["service", "start"]).joined(separator: " "))")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: command[0])
         process.arguments = Array(command.dropFirst()) + ["service", "start"]

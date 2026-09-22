@@ -211,9 +211,13 @@ chip (`Switch` where narrow), beside "‹ Back" on large. Small and medium draw
 it at the small type scale (`compact`), which is what lets the full wording fit
 medium's 147pt. The active account shows "Active" instead, and an account whose
 slot holds no stored backup (`switchable: false`) shows "Not switchable"
-(`No login` in small's 62pt): the same rule `cswap switch N` applies. A
-disabled slot stays switchable (disabled only leaves automatic rotation), and
-`kind` is not checked.
+(`No login` in small's 62pt). A disabled slot shows "Disabled": `cswap switch
+N` would take it, but the backend refuses a *widget* switch to a disabled slot
+(`apply_switch_request`, "a tap on a dimmed row is far likelier a slip"), so
+offering it here could only ever end in "Switch not applied". `kind` is not
+checked -- an API-key slot with a backup switches like any other. The intent
+re-checks the same rule before it writes, since a tap can land on a rendering
+drawn before the slot changed.
 
 Tapping it runs `SwitchAccountIntent` in the extension, which writes
 `~/.claude-swap-backup/widget-requests/switch-<epochMillis>.json` (via
@@ -269,12 +273,48 @@ as long as its info window is up). On the start URL it:
 3. runs `<cswap> service start` (20s timeout; PATH extended with those
    directories, since a LaunchServices launch gets launchd's bare PATH);
 4. on success waits up to 5s for a snapshot newer than the click, reloads the
-   widget and quits; on failure removes the marker and shows an `NSAlert`
-   with the exit status and the last lines of output, then quits.
+   widget and quits; on failure writes `widget-requests/.backend-start-failed`
+   (`{"at": ..., "reason": ...}`) and quits. Either way it removes
+   `.backend-starting` first, so a finished start never leaves the widget on
+   "Starting…".
 
-An alert rather than a notification: a notification needs permission granted
-beforehand -- the permission prompt would be the first thing the user sees --
-and can be silenced, while a failed start is rare and needs acting on.
+**Nothing is ever drawn on this path** -- no window, no alert. The tap came
+from a widget, so the answer belongs in the widget: while the snapshot is
+still stale the Start control reads the failure marker and becomes
+"Start failed · Retry" (`Failed · Retry`, and on small's 62pt a single Retry
+chip with a warning glyph), with the reason in its `accessibilityLabel`. It
+clears on a fresh snapshot, on the next attempt, or after 3 minutes. Large and
+extra-large drop the "Backend stopped" wording while it shows, since the
+control already says it.
+
+That is also why a launch that says it is plain waits a moment before opening
+the info window: `launchIsDefaultUserInfoKey` is missing on a cold URL launch
+(which reads as "plain") and the URL event can arrive after
+`applicationDidFinishLaunching`, so deciding at that moment put the info window
+in front of a Start tap -- the backend did start, the window just made it look
+as if nothing had happened. An unknown URL now quits without drawing anything.
+
+The host has no window to report in, so it logs: a line per launch and per
+start to `widget-requests/.host.log` (trimmed to the last 200 lines past 64KB)
+and to `os_log` under subsystem `com.cswap.widget`:
+
+```bash
+tail -f ~/.claude-swap-backup/widget-requests/.host.log
+log stream --predicate 'subsystem == "com.cswap.widget"'
+```
+
+Note that `cswap service start` is a no-op when the backend is already running
+this build: it exits 0, which is a success here.
+
+What the host will exec is checked first. The snapshot is the user's own 0600
+file, so a doctored `cswapCommand` already needs code running as them; what it
+would buy is the host's identity, since an unsandboxed notarized app's child
+inherits its TCC and responsible-process standing and the user starts it by
+tapping a legitimate control. So only the two shapes `resolve_program()` ever
+writes are accepted -- an absolute path whose basename is `cswap`, or an
+interpreter with argv exactly `["-m", "claude_swap"]` -- and only when the file
+is not group- or world-writable. Anything else falls back to the known install
+paths, or fails as "cswap was not found".
 
 The host is unsandboxed for this. A sandboxed parent cannot read the snapshot
 without an exception, and whatever it execs inherits its sandbox, so `cswap`
@@ -352,7 +392,7 @@ Shared/Trend.swift                       24h trend: samples in range, time axis,
 Shared/Navigation.swift                  selection state: select, neighbor, back, scroll, resolve
 Shared/AutoswitchToggle.swift            toggle request file + pending-state resolution
 Shared/AccountSwitch.swift               switch request file, eligibility, pending-state resolution
-Shared/BackendStart.swift                start URL, start marker, "Starting…", finding cswap
+Shared/BackendStart.swift                start URL, start/failure markers, "Starting…", finding cswap
 Shared/RequestDrop.swift                 atomic dot-temp + rename writes into the drop directory
 Widget/CswapWidgetBundle.swift           @main WidgetBundle
 Widget/CswapWidget.swift                 provider, Appearance override, widget definition

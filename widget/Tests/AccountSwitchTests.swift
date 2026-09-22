@@ -60,9 +60,17 @@ final class AccountSwitchTests: XCTestCase {
         XCTAssertEqual(try account(number: 2, switchable: false).switchEligibility(activeNumber: 1), .notSwitchable)
     }
 
-    func testDisabledAndAPIKeySlotsStayExplicitTargets() throws {
-        // As in `cswap switch N`: disabled only leaves automatic rotation.
-        XCTAssertEqual(try account(number: 2, disabled: true).switchEligibility(activeNumber: 1), .eligible)
+    func testDisabledIsNotOffered() throws {
+        // The backend refuses a widget switch to a disabled slot
+        // (`apply_switch_request`), so offering it would only ever end in
+        // "Switch not applied".
+        XCTAssertEqual(try account(number: 2, disabled: true).switchEligibility(activeNumber: 1), .disabled)
+        // No backup either: that is the plainer reason, so it is the one shown.
+        XCTAssertEqual(try account(number: 2, switchable: false, disabled: true)
+            .switchEligibility(activeNumber: 1), .notSwitchable)
+    }
+
+    func testAPIKeySlotWithABackupStaysAnExplicitTarget() throws {
         XCTAssertEqual(try account(number: 3, kind: "api_key").switchEligibility(activeNumber: 1), .eligible)
         XCTAssertEqual(try account(number: 4).switchEligibility(activeNumber: nil), .eligible)
     }

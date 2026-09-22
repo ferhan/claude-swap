@@ -65,14 +65,35 @@ struct StartBackendControl: View {
     var compact = false
 
     var body: some View {
-        if context.isBackendStarting {
+        switch context.startState {
+        case .starting:
             ActionNote(title: "Starting…", symbol: "hourglass", compact: compact)
-        } else {
-            Link(destination: BackendStart.url) {
-                ActionChip(title: short ? "Start" : "Start backend",
-                           symbol: "play.circle.fill", compact: compact)
+        case .failed(let reason):
+            // The host app has no window to report in: this is where a failed
+            // start is told, with the reason riding along for VoiceOver.
+            ViewThatFits(in: .horizontal) {
+                failed("Start failed")
+                failed("Failed")
+                // Small's 62pt: the chip's own symbol carries the failure.
+                startLink(title: "Retry", symbol: "exclamationmark.arrow.circlepath")
             }
-            .accessibilityLabel("Start backend")
+            .accessibilityLabel("Start failed: \(reason.isEmpty ? "unknown error" : reason). Retry.")
+        case .idle:
+            startLink(title: short ? "Start" : "Start backend", symbol: "play.circle.fill")
+                .accessibilityLabel("Start backend")
+        }
+    }
+
+    private func failed(_ text: String) -> some View {
+        HStack(spacing: 6) {
+            ActionNote(title: text, symbol: "exclamationmark.circle", compact: compact)
+            startLink(title: "Retry", symbol: "arrow.clockwise")
+        }
+    }
+
+    private func startLink(title: String, symbol: String) -> some View {
+        Link(destination: BackendStart.url) {
+            ActionChip(title: title, symbol: symbol, compact: compact)
         }
     }
 }
@@ -112,6 +133,12 @@ struct SwitchControl: View {
                     ActionNote(title: "No login", symbol: "nosign", compact: compact)
                 }
                 .accessibilityLabel("Not switchable: no stored login for this account")
+            case .disabled:
+                ViewThatFits(in: .horizontal) {
+                    ActionNote(title: "Disabled", symbol: "nosign", compact: compact)
+                    ActionNote(title: "Disabled", compact: compact)
+                }
+                .accessibilityLabel("Disabled: this account cannot be switched to from the widget")
             case .eligible:
                 switch context.switchState {
                 case .switching(target: account.number):

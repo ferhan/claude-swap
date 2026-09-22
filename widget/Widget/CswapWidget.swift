@@ -15,6 +15,8 @@ struct Entry: TimelineEntry {
     var pendingSwitch: PendingSwitch?
     /// When the host app last started the backend (its marker file).
     var backendStartedAt: Date?
+    /// The host app's last failed start (its failure marker).
+    var backendFailure: BackendStart.FailureNote?
     let appearance: AppearanceOption
 }
 
@@ -44,7 +46,7 @@ struct Provider: AppIntentTimelineProvider {
         let expiries = Set([
             AutoswitchToggle.expiry(of: first.pendingToggle, now: now),
             AccountSwitch.expiry(of: first.pendingSwitch, now: now),
-            BackendStart.expiry(markerAt: first.backendStartedAt, now: now)
+            BackendStart.expiry(markerAt: first.backendStartedAt, failure: first.backendFailure, now: now)
         ].compactMap { $0 }.filter { $0 < reload }).sorted()
         var entries = [first]
         for date in expiries {
@@ -65,6 +67,7 @@ struct Provider: AppIntentTimelineProvider {
                      pendingToggle: AutoswitchStore.pending(),
                      pendingSwitch: SwitchStore.pending(),
                      backendStartedAt: SnapshotFile.loadBackendStart(),
+                     backendFailure: SnapshotFile.loadBackendFailure(),
                      appearance: configuration.appearance)
     }
 }

@@ -29,6 +29,9 @@ enum SnapshotFile {
     /// The host app's "a start was asked for" marker (see `BackendStart`).
     static var backendStartMarker: URL { requestsDirectory.appending(path: BackendStart.markerName) }
 
+    /// Its "the start failed" marker, beside it.
+    static var backendFailureMarker: URL { requestsDirectory.appending(path: BackendStart.failureName) }
+
     // NSHomeDirectory() is the sandbox container, not ~; the passwd entry is
     // the real home the CLI writes into, and also the root the sandbox
     // exceptions' home-relative paths resolve against.
@@ -45,5 +48,9 @@ enum SnapshotFile {
 
     static func loadBackendStart() -> Date? {
         (try? Data(contentsOf: backendStartMarker)).flatMap(BackendStart.markerDate)
+    }
+
+    static func loadBackendFailure() -> BackendStart.FailureNote? {
+        (try? Data(contentsOf: backendFailureMarker)).flatMap(BackendStart.failureNote)
     }
 }
