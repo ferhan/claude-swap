@@ -205,13 +205,15 @@ value wins again. Logic: `Shared/AutoswitchToggle.swift`.
 
 ## Switch to this account
 
-The selected account's detail -- the extra-large right column, the large
-detail view, the medium right column -- carries a "Switch to this account"
-chip (`Switch` where narrow), beside "‹ Back" on large. Medium draws it at the
-small type scale (`compact`), which is what lets the full wording fit 147pt. The active account shows "Active" instead, and an account whose slot
-holds no stored backup (`switchable: false`) shows "Not switchable": the same
-rule `cswap switch N` applies. A disabled slot stays switchable (disabled only
-leaves automatic rotation), and `kind` is not checked.
+The shown account -- the extra-large right column, the large detail view, the
+medium right column, small's page -- carries a "Switch to this account"
+chip (`Switch` where narrow), beside "‹ Back" on large. Small and medium draw
+it at the small type scale (`compact`), which is what lets the full wording fit
+medium's 147pt. The active account shows "Active" instead, and an account whose
+slot holds no stored backup (`switchable: false`) shows "Not switchable"
+(`No login` in small's 62pt): the same rule `cswap switch N` applies. A
+disabled slot stays switchable (disabled only leaves automatic rotation), and
+`kind` is not checked.
 
 Tapping it runs `SwitchAccountIntent` in the extension, which writes
 `~/.claude-swap-backup/widget-requests/switch-<epochMillis>.json` (via
@@ -227,13 +229,21 @@ The backend applies a request under 60s old through the same path as
 snapshot's `activeAccountNumber` is the target, or for 30s; then "Switch not
 applied" with a Retry chip for 30s more. With the snapshot stale the intent
 does not write at all -- and the chip is not drawn: "Start backend" takes its
-place. Logic: `Shared/AccountSwitch.swift`.
+place. On small and medium it takes the place of "Active" and "Not switchable"
+too, because that one spot is the only place either size can offer a start;
+large and extra-large keep their own state there, since their header already
+carries the chip. Logic: `Shared/AccountSwitch.swift`.
 
 ## Start backend
 
 When the snapshot is more than 3 minutes old the header reads "Backend
 stopped" (shortened to an icon where tight) followed by a "Start backend"
-chip (`Start` where tight).
+chip (`Start` where tight) -- a filled play glyph and the words. Small and
+medium have no header, so the chip appears where the switch control would be:
+`▶ Start backend` fits medium's 147pt column whole, and small's 62pt beside
+the pager takes `▶ Start`. A widget gets no hover, and `.help()` does not
+survive the out-of-process renderer, so the tooltip is an
+`accessibilityLabel` of "Start backend" on every form.
 
 A widget cannot run a process, and an `AppIntent` in a widget runs in the
 sandboxed extension, which cannot exec `cswap`. So the chip is a `Link` to
@@ -350,12 +360,12 @@ Widget/Intents.swift                     Appearance config intent, ‹ › page,
                                          back, scroll, refresh and auto-switch intents,
                                          page/nav/toggle stores
 Widget/Components.swift                  ring, bar, badges, window row, pager
-Widget/Pages.swift                       small; medium's hero, right column and ‹ › selection pager
+Widget/Pages.swift                       small's one-account page; medium's hero, right column and ‹ ›
 Widget/LargePages.swift                  large: list/detail routing, the list, the trend panel
 Widget/AutoStatusLine.swift              the auto-switch chip and its state line
 Widget/ActionControls.swift              Switch to this account, Start backend
 Widget/ExtraLargePage.swift              extra-large master-detail: rows, pace, model usage
-Widget/DetailPages.swift                 per-account detail: small's parts, the facts grid, the large view
+Widget/DetailPages.swift                 the facts grid, and large's drill-down detail view
 Widget/SnapshotFile.swift                the only place the snapshot and request paths are decided
 Widget/CswapWidgetExtension.entitlements sandbox + snapshot read + request-drop write exceptions
 Tests/SnapshotGoldenTests.swift          decodes ../tests/fixtures/snapshot_golden.json
@@ -388,11 +398,20 @@ never sees it half-written.
 
 All four sizes (small, medium, large, extra-large), a per-widget Appearance
 setting (System/Light/Dark, from Edit Widget), and an auto-switch line with a
-toggle on large and extra-large, and "Switch to this account" in the
-selected account's detail. When the snapshot is more than 3 minutes old the
+toggle on large and extra-large, and "Switch to this account" wherever an
+account is shown. When the snapshot is more than 3 minutes old the
 header says "Backend stopped · updated 13m ago" instead of the time, with a
 "Start backend" chip (both shortened where tight). Small is the one size that
-still pages with ‹ ›, alternating a hero and a detail page per account.
+still pages with ‹ ›, and its pages are the accounts: one per login, nothing
+else.
+
+Small is that one account at 164×164: the initials badge and name, the 5h ring
+with its ticking countdown, the weekly bar with its percent and `3d 11h`, and
+a bottom line holding the pager and -- in the spot the active account's
+"Active" takes -- the switch control for any other account (`⇄ Switch`,
+`Switching…`, `↻ Retry`, `No login`, `▶ Start`). So the account on screen is
+always the one a tap switches to. With one account the ‹ › are dimmed: they
+still wrap, they just have nowhere to go.
 
 Medium, large and extra-large all keep a selection in one `NavState`
 (mode, selection, list offset) per size; only large has a detail mode.

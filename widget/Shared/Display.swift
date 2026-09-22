@@ -226,22 +226,13 @@ enum LayoutFamily: String, Sendable, CaseIterable {
     case small, medium, large, extraLarge
 }
 
-enum Page: Equatable, Sendable {
-    /// Small: one account's hero.
-    case hero(account: Int)
-    /// Small: one account's detail.
-    case detail(account: Int)
-}
-
 enum Paging {
-    /// Small is the one size left that pages: a hero and a detail per account,
-    /// so ‹ › reaches everything. Every other size keeps a selection instead
-    /// (see `Navigation`).
-    static func pages(for family: LayoutFamily, snapshot: Snapshot) -> [Page] {
+    /// Small is the one size left that pages, and its pages are the accounts:
+    /// one hero each, in display order, so ‹ › walks the logins and nothing
+    /// else. Every other size keeps a selection instead (see `Navigation`).
+    static func pages(for family: LayoutFamily, snapshot: Snapshot) -> [Int] {
         guard family == .small else { return [] }
-        return snapshot.orderedAccounts.flatMap {
-            [Page.hero(account: $0.number), .detail(account: $0.number)]
-        }
+        return snapshot.orderedAccounts.map(\.number)
     }
 
     static func normalized(_ index: Int, count: Int) -> Int {
@@ -250,14 +241,9 @@ enum Paging {
     }
 
     /// The text between ‹ and ›.
-    static func label(for page: Page, snapshot: Snapshot) -> String {
-        switch page {
-        case .hero(let number):
-            let accounts = snapshot.orderedAccounts
-            let position = (accounts.firstIndex { $0.number == number } ?? 0) + 1
-            return "\(position)/\(accounts.count)"
-        case .detail(let number):
-            return "\(snapshot.account(number: number)?.label ?? "#\(number)") · details"
-        }
+    static func label(forAccount number: Int, snapshot: Snapshot) -> String {
+        let accounts = snapshot.orderedAccounts
+        let position = (accounts.firstIndex { $0.number == number } ?? 0) + 1
+        return "\(position)/\(accounts.count)"
     }
 }

@@ -28,19 +28,26 @@ struct ActionChip: View {
     }
 }
 
-/// A state in words beside, or instead of, a control.
+/// A state in words beside, or instead of, a control. The symbol is optional
+/// because small's bottom line is 62pt beside the pager: the glyph is what
+/// gives way there, not the word.
 struct ActionNote: View {
     let title: String
-    let symbol: String
+    var symbol: String?
     var compact = false
 
     var body: some View {
-        Label(title, systemImage: symbol)
-            .labelStyle(.titleAndIcon)
-            .font(.system(size: compact ? 10 : 12, weight: .medium))
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .fixedSize()
+        Group {
+            if let symbol {
+                Label(title, systemImage: symbol).labelStyle(.titleAndIcon)
+            } else {
+                Text(title)
+            }
+        }
+        .font(.system(size: compact ? 10 : 12, weight: .medium))
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .fixedSize()
     }
 }
 
@@ -62,40 +69,56 @@ struct StartBackendControl: View {
             ActionNote(title: "Starting…", symbol: "hourglass", compact: compact)
         } else {
             Link(destination: BackendStart.url) {
-                ActionChip(title: short ? "Start" : "Start backend", symbol: "play.circle", compact: compact)
+                ActionChip(title: short ? "Start" : "Start backend",
+                           symbol: "play.circle.fill", compact: compact)
             }
             .accessibilityLabel("Start backend")
         }
     }
 }
 
-/// The selected account's switch control: a button for an account that can
+/// The shown account's switch control: a button for an account that can
 /// be switched to, "Active" for the active one, and the pending/failed state
-/// of a request. With the backend stopped nothing would apply a request, so
-/// the button gives way to "Start backend".
+/// of a request.
+///
+/// With the backend stopped nothing would apply a request, so the control
+/// gives way to "Start backend". On small and medium it gives way whatever
+/// the account is, the active one included: this spot is the only place those
+/// two sizes can offer a start, and the header chip large and extra-large
+/// carry is what keeps the rule to the eligible account there.
+///
+/// Small draws it in the same spot "Active" takes, with 62pt beside the
+/// pager, which is what every shortened form here is for.
 struct SwitchControl: View {
     let account: Account
     let context: PageContext
-    /// Medium: the small type scale (see `ActionChip`).
+    /// Small and medium: the small type scale (see `ActionChip`).
     var compact = false
 
     var body: some View {
-        switch account.switchEligibility(activeNumber: context.snapshot.activeAccountNumber) {
-        case .active:
-            ActiveMarker()
-        case .notSwitchable:
-            ActionNote(title: "Not switchable", symbol: "nosign", compact: compact)
-                .accessibilityLabel("Not switchable: no stored login for this account")
-        case .eligible:
-            if context.isBackendStale {
+        let eligibility = account.switchEligibility(activeNumber: context.snapshot.activeAccountNumber)
+        if context.isBackendStale && (compact || eligibility == .eligible) {
+            ViewThatFits(in: .horizontal) {
+                StartBackendControl(context: context, compact: compact)
+                StartBackendControl(context: context, short: true, compact: compact)
+            }
+        } else {
+            switch eligibility {
+            case .active:
+                ActiveMarker()
+            case .notSwitchable:
                 ViewThatFits(in: .horizontal) {
-                    StartBackendControl(context: context, compact: compact)
-                    StartBackendControl(context: context, short: true, compact: compact)
+                    ActionNote(title: "Not switchable", symbol: "nosign", compact: compact)
+                    ActionNote(title: "No login", symbol: "nosign", compact: compact)
                 }
-            } else {
+                .accessibilityLabel("Not switchable: no stored login for this account")
+            case .eligible:
                 switch context.switchState {
                 case .switching(target: account.number):
-                    ActionNote(title: "Switching…", symbol: "clock", compact: compact)
+                    ViewThatFits(in: .horizontal) {
+                        ActionNote(title: "Switching…", symbol: "clock", compact: compact)
+                        ActionNote(title: "Switching…", compact: compact)
+                    }
                 case .notApplied(target: account.number):
                     ViewThatFits(in: .horizontal) {
                         notApplied("Switch not applied")

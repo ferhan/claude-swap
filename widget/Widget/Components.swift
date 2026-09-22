@@ -360,6 +360,8 @@ struct Countdown: View {
 struct Pager: View {
     let family: LayoutFamily
     let label: String
+    /// One page: the arrows still work, they just have nowhere to go.
+    var dimmed = false
     @Environment(\.largeType) private var largeType
 
     var body: some View {
@@ -384,6 +386,7 @@ struct Pager: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
+        .opacity(dimmed ? 0.3 : 1)
         .accessibilityLabel(name)
     }
 }

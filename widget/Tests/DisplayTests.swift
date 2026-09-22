@@ -97,14 +97,26 @@ final class DisplayTests: XCTestCase {
 
     // MARK: - Paging
 
-    func testSmallPagesAlternateHeroAndDetail() throws {
+    func testSmallPagesAreTheAccountsAndNothingElse() throws {
         let snapshot = try golden()
         let pages = Paging.pages(for: .small, snapshot: snapshot)
-        XCTAssertEqual(pages.count, 8)
-        XCTAssertEqual(pages[0], .hero(account: 1))
-        XCTAssertEqual(pages[1], .detail(account: 1))
-        XCTAssertEqual(Paging.label(for: pages[2], snapshot: snapshot), "2/4")
-        XCTAssertEqual(Paging.label(for: pages[1], snapshot: snapshot), "work · details")
+        // One page per account, in display order: no detail page between them.
+        XCTAssertEqual(pages, snapshot.orderedAccounts.map(\.number))
+        XCTAssertEqual(pages, [1, 2, 3, 4])
+        XCTAssertEqual(Paging.label(forAccount: pages[1], snapshot: snapshot), "2/4")
+        XCTAssertEqual(Paging.label(forAccount: pages[3], snapshot: snapshot), "4/4")
+    }
+
+    /// Small draws the switch control where the active account says "Active",
+    /// so every page's affordance is that account's own eligibility.
+    func testEverySmallPageOffersItsOwnAccountsSwitchState() throws {
+        let snapshot = try golden()
+        let states = try Paging.pages(for: .small, snapshot: snapshot).map { number in
+            try XCTUnwrap(snapshot.account(number: number))
+                .switchEligibility(activeNumber: snapshot.activeAccountNumber)
+        }
+        // 1 is active, 2 and 3 have a stored login, 4 (api key) has none.
+        XCTAssertEqual(states, [.active, .eligible, .eligible, .notSwitchable])
     }
 
     func testOnlySmallHasPagerPages() throws {

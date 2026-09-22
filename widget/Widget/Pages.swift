@@ -44,12 +44,12 @@ struct CswapWidgetView: View {
             }
         } else {
             let pages = Paging.pages(for: family, snapshot: snapshot)
-            let page = pages[Paging.normalized(entry.pageIndex, count: pages.count)]
+            let number = pages[Paging.normalized(entry.pageIndex, count: pages.count)]
             let context = PageContext(snapshot: snapshot, now: entry.date, family: family,
-                                      pagerLabel: Paging.label(for: page, snapshot: snapshot),
+                                      pagerLabel: Paging.label(forAccount: number, snapshot: snapshot),
                                       pendingToggle: entry.pendingToggle, pendingSwitch: entry.pendingSwitch,
                                       backendStartedAt: entry.backendStartedAt)
-            SmallPage(context: context, page: page)
+            SmallPage(context: context, accountNumber: number)
         }
     }
 }
@@ -75,7 +75,9 @@ struct PageContext {
                                      pending: pendingToggle, now: now)
         }
     }
-    var pager: Pager { Pager(family: family, label: pagerLabel) }
+    var pager: Pager {
+        Pager(family: family, label: pagerLabel, dimmed: snapshot.accounts.count < 2)
+    }
 
     var switchState: SwitchState {
         AccountSwitch.resolve(activeNumber: snapshot.activeAccountNumber, pending: pendingSwitch, now: now)
@@ -203,43 +205,31 @@ struct NoUsage: View {
 
 // MARK: - Small
 
+/// Small is one hero per account: ‹ › walk the logins, with no detail page
+/// between them. The bottom line is "Active" for the account in use and the
+/// switch control -- in its compact form, with all its states -- for any
+/// other, so the page the user is looking at is also the one they can switch
+/// to.
 struct SmallPage: View {
     let context: PageContext
-    let page: Page
+    let accountNumber: Int
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            switch page {
-            case .hero(let number):
-                if let account = context.snapshot.account(number: number) {
-                    HeroHeader(account: account)
+            if let account = context.snapshot.account(number: accountNumber) {
+                HeroHeader(account: account)
+                Spacer(minLength: 4)
+                if account.usage != nil {
+                    HeroGauge(account: account, context: context)
                     Spacer(minLength: 4)
-                    if account.usage != nil {
-                        HeroGauge(account: account, context: context)
-                        Spacer(minLength: 4)
-                        HeroWeekly(account: account, context: context)
-                    } else {
-                        NoUsage(account: account)
-                    }
-                    Spacer(minLength: 4)
-                    HStack(spacing: 4) {
-                        if account.active {
-                            ActiveMarker()
-                        } else if context.isNext(account) {
-                            Tag(text: "Next up")
-                        }
-                        Spacer(minLength: 2)
-                        context.pager
-                    }
+                    HeroWeekly(account: account, context: context)
+                } else {
+                    NoUsage(account: account)
                 }
-            case .detail(let number):
-                if let account = context.snapshot.account(number: number) {
-                    DetailHeader(account: account)
-                    Spacer(minLength: 3)
-                    DetailFacts(account: account, context: context, compact: true)
-                    Spacer(minLength: 3)
-                    DetailWindows(account: account, context: context, limit: 2, titleWidth: 28, compact: true)
-                    Spacer(minLength: 3)
+                Spacer(minLength: 4)
+                HStack(spacing: 4) {
+                    SwitchControl(account: account, context: context, compact: true)
+                    Spacer(minLength: 2)
                     context.pager
                 }
             }
