@@ -25,7 +25,7 @@ struct ExtraLargePage: View {
                 }
                 Spacer(minLength: 0)
             }
-            .frame(width: 300)
+            .frame(width: 326)
             Divider()
             VStack(alignment: .leading, spacing: 9) {
                 if let selected {
@@ -100,9 +100,9 @@ struct SelectableRow: View {
     var body: some View {
         let accent: Color = mode == .fullColor ? .accentColor : .primary
         Button(intent: SelectAccountIntent(family: context.family, number: account.number)) {
-            HStack(spacing: 7) {
-                InitialsBadge(account: account, size: 20)
-                VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                InitialsBadge(account: account, size: 22)
+                VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 4) {
                         // The subtitle goes before the name is cut short.
                         ViewThatFits(in: .horizontal) {
@@ -124,7 +124,8 @@ struct SelectableRow: View {
                     if account.usage != nil {
                         HStack(spacing: 10) {
                             if let fiveHour = account.usage?.fiveHour {
-                                MiniWindow(title: "5h", window: fiveHour, account: account, context: context)
+                                MiniWindow(title: "5h", window: fiveHour, account: account, context: context,
+                                           ticking: true)
                             }
                             if let (title, window) = account.weeklyWindow {
                                 MiniWindow(title: title == "Weekly" ? "7d" : title, window: window,
@@ -143,8 +144,8 @@ struct SelectableRow: View {
                     .foregroundStyle(isSelected ? accent : .clear)
                     .widgetAccentable()
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 10)
                 .fill(isSelected ? accent.opacity(0.16) : Color.primary.opacity(0.04)))
@@ -165,12 +166,14 @@ struct SelectableRow: View {
     }
 }
 
-/// `5h ▰▰▱ 62%` -- a label, a short bar and the percent, for list rows.
+/// `5h ▰▰▱ 62% 3:29:12` -- a label, a short bar, the percent and the time to
+/// reset, for list rows. The 5h countdown ticks; weekly ones read `3d 11h`.
 struct MiniWindow: View {
     let title: String
     let window: Window
     let account: Account
     let context: PageContext
+    var ticking = false
 
     var body: some View {
         HStack(spacing: 4) {
@@ -181,6 +184,11 @@ struct MiniWindow: View {
                 .fixedSize()
             UsageBar(pct: window.pct, threshold: context.threshold, height: 4, dimmed: account.isStale)
             PctText(pct: window.pct, threshold: context.threshold, font: .system(size: 9.5, weight: .semibold))
+            // Fixed width: a ticking timer otherwise claims all it is offered.
+            Countdown(resetsAt: window.resetsAt, now: context.now, ticking: ticking)
+                .font(.system(size: 9).monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 42, alignment: .trailing)
         }
     }
 }

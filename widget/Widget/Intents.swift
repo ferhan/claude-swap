@@ -14,7 +14,7 @@ enum AppearanceOption: String, AppEnum {
 }
 
 struct CswapConfigIntent: WidgetConfigurationIntent {
-    static let title: LocalizedStringResource = "cswap"
+    static let title: LocalizedStringResource = "ClaudeSwap"
     static let description = IntentDescription("Claude account usage at a glance.")
 
     @Parameter(title: "Appearance", default: .system)
@@ -134,6 +134,57 @@ struct RefreshIntent: AppIntent {
     func perform() async throws -> some IntentResult {
         WidgetCenter.shared.reloadTimelines(ofKind: CswapWidget.kind)
         return .result()
+    }
+}
+
+/// The auto-switch toggle. The widget cannot change cswap's settings itself:
+/// it drops a request file for the backend to apply, then remembers what it
+/// asked for so the toggle shows the new state until the snapshot agrees.
+struct SetAutoswitchIntent: SetValueIntent {
+    static let title: LocalizedStringResource = "Turn ClaudeSwap auto-switch on or off"
+    static let isDiscoverable = false
+
+    @Parameter(title: "Enabled")
+    var value: Bool
+
+    init() {}
+
+    init(enabled: Bool) {
+        value = enabled
+    }
+
+    func perform() async throws -> some IntentResult {
+        let now = Date()
+        let delivered = (try? AutoswitchRequest.write(enabled: value, at: now,
+                                                      into: SnapshotFile.requestsDirectory)) != nil
+        AutoswitchStore.set(PendingToggle(desired: value, requestedAt: now, delivered: delivered))
+        if delivered {
+            // The backend applies a request within about a second. Wait that
+            // long for it, so the reload that follows usually draws the
+            // confirmed state rather than the pending one.
+            for _ in 0..<8 {
+                try? await Task.sleep(for: .milliseconds(250))
+                if SnapshotFile.load()?.autoswitch?.enabled == value { break }
+            }
+        }
+        WidgetCenter.shared.reloadTimelines(ofKind: CswapWidget.kind)
+        return .result()
+    }
+}
+
+/// The last toggle request, in the extension's own sandboxed defaults. One
+/// value, not per size: auto-switch is global, so every widget shows it alike.
+enum AutoswitchStore {
+    private static let key = "autoswitch.pending"
+
+    static func pending() -> PendingToggle? {
+        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(PendingToggle.self, from: data)
+    }
+
+    static func set(_ pending: PendingToggle) {
+        guard let data = try? JSONEncoder().encode(pending) else { return }
+        UserDefaults.standard.set(data, forKey: key)
     }
 }
 

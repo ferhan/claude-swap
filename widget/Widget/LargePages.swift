@@ -36,7 +36,8 @@ struct LargePage: View {
     }
 }
 
-/// `⇄ cswap  as of 10:03`, the first line of large and extra-large.
+/// `⇄ ClaudeSwap  as of 10:03`, the first line of large and extra-large. When
+/// the backend has stopped republishing, the time gives way to saying so.
 struct BrandTitle: View {
     let context: PageContext
 
@@ -46,30 +47,62 @@ struct BrandTitle: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.tint)
                 .widgetAccentable()
-            Text("cswap").font(.system(size: 13, weight: .bold))
-            Text("as of \(context.snapshot.takenAt.formatted(date: .omitted, time: .shortened))")
-                .font(.system(size: 9.5))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            Text("ClaudeSwap").font(.system(size: 13, weight: .bold)).fixedSize()
+            if context.isBackendStale {
+                // The wording shortens before the message is cut short.
+                let age = context.now.timeIntervalSince(context.snapshot.takenAt)
+                ViewThatFits(in: .horizontal) {
+                    backendDown(Format.backendDown(age: age))
+                    backendDown("Backend not running · \(Format.age(seconds: age))")
+                    backendDown("Backend not running")
+                }
+            } else {
+                Text("as of \(context.snapshot.takenAt.formatted(date: .omitted, time: .shortened))")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
         }
+    }
+
+    private func backendDown(_ text: String) -> some View {
+        Label(text, systemImage: "exclamationmark.circle")
+            .labelStyle(.titleAndIcon)
+            .font(.system(size: 9.5, weight: .medium))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .fixedSize()
     }
 }
 
-/// Read-only: the toggle is a later task, so this renders state, not a Toggle.
+/// The auto-switch line: a toggle, its state, and who is next up. The toggle
+/// drops a request for the backend (see `SetAutoswitchIntent`) and shows the
+/// asked-for state, marked pending, until the snapshot agrees.
 struct AutoStatusLine: View {
     let context: PageContext
 
     var body: some View {
         HStack(spacing: 5) {
-            if let auto = context.snapshot.autoswitch {
-                Image(systemName: auto.enabled ? "checkmark.circle.fill" : "pause.circle")
-                    .widgetAccentable(auto.enabled)
-                Text(auto.enabled ? "Auto-switch at \(Format.pct(auto.threshold))"
-                                  : "Auto-switch off")
+            if let auto = context.snapshot.autoswitch, let toggle = context.toggle {
+                Toggle(isOn: toggle.isOn, intent: SetAutoswitchIntent(enabled: !toggle.isOn)) {
+                    Text("Auto-switch")
+                }
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .labelsHidden()
+                .accessibilityLabel("Auto-switch")
+                Text(toggle.isOn ? "Auto-switch at \(Format.pct(auto.threshold))" : "Auto-switch off")
                     .fontWeight(.semibold)
                     .foregroundStyle(.primary)
                     .fixedSize()
-                if auto.enabled, let next = context.snapshot.nextCandidate {
+                if toggle.isPending {
+                    Label("applying…", systemImage: "clock").labelStyle(.titleAndIcon).fixedSize()
+                } else if toggle.backendNotRunning && !context.isBackendStale {
+                    // A stale snapshot already says so in the header.
+                    Label("backend not running", systemImage: "exclamationmark.circle")
+                        .labelStyle(.titleAndIcon)
+                        .fixedSize()
+                } else if toggle.isOn, let next = context.snapshot.nextCandidate {
                     Text("· next up").fixedSize()
                     InitialsBadge(account: next, size: 14)
                     // The "(12% used)" goes before the name is cut short.

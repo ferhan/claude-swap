@@ -15,19 +15,24 @@ import Foundation
 /// `~/.claude/`, which is Claude Code's, gets pruned by it, and moves when
 /// `CLAUDE_CONFIG_DIR` is set.
 ///
-/// **The path is this one property plus the read exception in
+/// **The paths are these two properties plus the two exceptions in
 /// `CswapWidgetExtension.entitlements`.** Nothing else in the widget knows
-/// where the snapshot is; the two must move together or the extension gets
-/// EPERM.
+/// where the snapshot or the request drop is; each must move with its
+/// exception or the extension gets EPERM.
 enum SnapshotFile {
-    static var url: URL {
-        // NSHomeDirectory() is the sandbox container, not ~; the passwd entry
-        // is the real home the CLI writes into, and also the root the sandbox
-        // exception's home-relative path resolves against.
-        let home = getpwuid(getuid())
+    static var url: URL { home.appending(path: ".claude-swap-backup/snapshot.json") }
+
+    /// Where the auto-switch toggle drops its request files (see
+    /// `AutoswitchRequest`). The backend creates it; the widget never does.
+    static var requestsDirectory: URL { home.appending(path: ".claude-swap-backup/widget-requests") }
+
+    // NSHomeDirectory() is the sandbox container, not ~; the passwd entry is
+    // the real home the CLI writes into, and also the root the sandbox
+    // exceptions' home-relative paths resolve against.
+    private static var home: URL {
+        getpwuid(getuid())
             .map { URL(fileURLWithPath: String(cString: $0.pointee.pw_dir)) }
             ?? FileManager.default.homeDirectoryForCurrentUser
-        return home.appending(path: ".claude-swap-backup/snapshot.json")
     }
 
     static func load() -> Snapshot? {

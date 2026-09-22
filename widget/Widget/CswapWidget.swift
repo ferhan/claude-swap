@@ -8,6 +8,9 @@ struct Entry: TimelineEntry {
     let pageIndex: Int
     /// Raw stored navigation; resolved against the snapshot at render.
     var nav = NavState()
+    /// The last auto-switch toggle request; resolved against the snapshot at
+    /// render.
+    var pendingToggle: PendingToggle?
     let appearance: AppearanceOption
 }
 
@@ -21,7 +24,7 @@ struct Provider: AppIntentTimelineProvider {
     }
 
     func timeline(for configuration: CswapConfigIntent, in context: Context) async -> Timeline<Entry> {
-        // One entry: every ticking thing on screen is a `Text(date:style:)`
+        // One entry (two while a toggle request is pending): every ticking thing on screen is a `Text(date:style:)`
         // driven by an absolute `resetsAt`, so WidgetKit ticks the countdowns
         // itself. The reload is what picks up a newer snapshot file (and
         // refreshes the human "3d 11h" countdowns).
@@ -29,15 +32,26 @@ struct Provider: AppIntentTimelineProvider {
         // only re-read a file that cannot have changed. WidgetKit budgets
         // reloads and may serve them less often than requested -- this is the
         // ceiling, not a guarantee.
-        Timeline(entries: [entry(configuration, context)], policy: .after(.now.addingTimeInterval(60)))
+        // A toggle request still waiting on the backend changes the drawing
+        // at its timeout, so that moment gets its own entry and a reload.
+        let now = Date.now
+        let first = entry(configuration, context, at: now)
+        let reload = now.addingTimeInterval(60)
+        guard let expiry = AutoswitchToggle.expiry(of: first.pendingToggle, now: now) else {
+            return Timeline(entries: [first], policy: .after(reload))
+        }
+        let second = Entry(date: expiry, snapshot: first.snapshot, pageIndex: first.pageIndex, nav: first.nav,
+                           pendingToggle: first.pendingToggle, appearance: first.appearance)
+        return Timeline(entries: [first, second], policy: .after(min(reload, expiry.addingTimeInterval(1))))
     }
 
-    private func entry(_ configuration: CswapConfigIntent, _ context: Context) -> Entry {
+    private func entry(_ configuration: CswapConfigIntent, _ context: Context, at date: Date = .now) -> Entry {
         let family = LayoutFamily(context.family)
-        return Entry(date: .now,
+        return Entry(date: date,
                      snapshot: SnapshotFile.load(),
                      pageIndex: PageStore.index(family),
                      nav: NavStore.state(family),
+                     pendingToggle: AutoswitchStore.pending(),
                      appearance: configuration.appearance)
     }
 }

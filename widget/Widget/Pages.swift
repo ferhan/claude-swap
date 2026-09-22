@@ -22,13 +22,15 @@ struct CswapWidgetView: View {
     @ViewBuilder private func loaded(_ snapshot: Snapshot) -> some View {
         if family == .extraLarge {
             ExtraLargePage(
-                context: PageContext(snapshot: snapshot, now: entry.date, family: family, pagerLabel: ""),
+                context: PageContext(snapshot: snapshot, now: entry.date, family: family, pagerLabel: "",
+                                     pendingToggle: entry.pendingToggle),
                 nav: Navigation.resolve(entry.nav, snapshot: snapshot, family: family))
         } else {
             let pages = Paging.pages(for: family, snapshot: snapshot)
             let page = pages[Paging.normalized(entry.pageIndex, count: pages.count)]
             let context = PageContext(snapshot: snapshot, now: entry.date, family: family,
-                                      pagerLabel: Paging.label(for: page, snapshot: snapshot))
+                                      pagerLabel: Paging.label(for: page, snapshot: snapshot),
+                                      pendingToggle: entry.pendingToggle)
             switch family {
             case .small: SmallPage(context: context, page: page)
             case .medium: MediumPage(context: context, page: page)
@@ -44,8 +46,19 @@ struct PageContext {
     let now: Date
     let family: LayoutFamily
     let pagerLabel: String
+    var pendingToggle: PendingToggle?
 
     var threshold: Double { snapshot.threshold }
+    var isBackendStale: Bool { snapshot.isBackendStale(now: now) }
+
+    /// The auto-switch toggle's drawn state; nil when the snapshot carries no
+    /// auto-switch block to toggle.
+    var toggle: ToggleResolution? {
+        snapshot.autoswitch.map {
+            AutoswitchToggle.resolve(snapshotEnabled: $0.enabled, snapshotStale: isBackendStale,
+                                     pending: pendingToggle, now: now)
+        }
+    }
     var pager: Pager { Pager(family: family, label: pagerLabel) }
 
     func isNext(_ account: Account) -> Bool { snapshot.nextCandidate?.number == account.number }

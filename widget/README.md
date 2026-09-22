@@ -7,18 +7,20 @@ It reads the JSON document `cswap snapshot` produces (see
 That schema, and that path, are the entire contract between the Python and the
 Swift, which is why the widget lives in this repo rather than its own.
 
-**This is a display surface, not a second front end — and it is view-only.**
-It cannot switch accounts, add or remove them, or change any other `cswap`
-state. A sandboxed extension holding a single read-only file exception cannot
-write `~/.claude.json`, reach the Keychain, take the switch locks, or exec
-`cswap`. All of that stays in the CLI, the TUI and the menu bar.
+**This is a display surface, not a second front end.** It cannot switch
+accounts, add or remove them, or change `cswap` state — with one exception,
+the auto-switch toggle, which only *asks*: it drops a request file that the
+backend applies (see "Auto-switch toggle" below). A sandboxed extension cannot
+write `~/.claude.json` or `settings.json`, reach the Keychain, take the switch
+locks, or exec `cswap`. All of that stays in the CLI, the TUI and the menu bar.
 
 WidgetKit's own ceiling is separate and looser: it allows `Button(intent:)` and
 `Toggle(isOn:intent:)` — no text fields, scrolling, selection or sheets — and
 an intent runs in the extension's process, which always has read-write access
 to *its own* container. So an intent can change what the widget **shows**
 (cycle the displayed account, switch which window is shown, force a refresh),
-just not what `cswap` **does**.
+not what `cswap` **does** -- except by dropping a request into the one
+directory it may write, for the backend to apply.
 
 The host app here is a stub whose only job is to be the container the widget
 extension ships inside; WidgetKit extensions cannot be installed standalone.
@@ -118,12 +120,17 @@ you can confirm with `xcodebuild ... CODE_SIGNING_ALLOWED=NO build`.
 
 ## Entitlements
 
-Both targets are sandboxed. The extension additionally carries one exception:
+Both targets are sandboxed. The extension additionally carries two exceptions:
 
 ```xml
 <key>com.apple.security.temporary-exception.files.home-relative-path.read-only</key>
 <array><string>/.claude-swap-backup/snapshot.json</string></array>
+<key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
+<array><string>/.claude-swap-backup/widget-requests/</string></array>
 ```
+
+The read-write one is the auto-switch toggle's drop directory and nothing
+else; see below.
 
 No App Group. The snapshot is written by the user's own `cswap`, installed from
 PyPI — a python3 process, with no code signature and so no entitlement, which
@@ -144,8 +151,42 @@ pkd: [com.apple.PlugInKit:discovery] rejecting; Ignoring mis-configured
 plugin at [.../CswapWidgetExtension.appex]: plug-ins must be sandboxed
 ```
 
-`Widget/SnapshotFile.url` and this entitlement are the same decision written
-twice. They move together or the extension gets `EPERM`.
+`Widget/SnapshotFile.url` / `.requestsDirectory` and these entitlements are the
+same decisions written twice. They move together or the extension gets `EPERM`.
+
+## Auto-switch toggle
+
+Large and extra-large put a native `Toggle(isOn:intent:)` on the auto-switch
+line, bound to the snapshot's `autoswitch.enabled`. Tapping it runs
+`SetAutoswitchIntent` in the extension, which writes
+`~/.claude-swap-backup/widget-requests/autoswitch-<epochMillis>.json`
+(as `.autoswitch-<epochMillis>.tmp`, then renamed; mode 0600):
+
+```json
+{"at": "2026-09-22T05:20:03Z", "autoswitch": {"enabled": false}}
+```
+
+The backend creates the directory (0700), applies the newest request to
+`settings.json` and republishes the snapshot. The widget never creates the
+directory: if it is missing or the write fails, the toggle does not flip and
+the line says "backend not running". After a successful write the widget keeps
+`{desired, at}` in its own defaults and draws the asked-for state marked
+"applying…" until the snapshot agrees, or for 30s, after which the snapshot's
+value wins again. Logic: `Shared/AutoswitchToggle.swift`.
+
+## Placed-widget query
+
+```bash
+~/Applications/ClaudeSwap.app/Contents/MacOS/ClaudeSwap --placed-widgets
+{"count": 4}
+```
+
+One JSON line with the number of placed ClaudeSwap widgets
+(`WidgetCenter.getCurrentConfigurations`), exit 0; on failure a message on
+stderr and exit 1 (including a 10s timeout). The argument is handled in
+`App/HostMain.swift` before any `NSApplication` exists, so no window opens and
+no Dock icon appears. The backend uses it to treat a placed widget as an open
+surface. Each placed widget counts once, whatever its size.
 
 ## Distribution
 
@@ -188,25 +229,28 @@ Archive, export, DMG, notarization and stapling are written but unrun.
 project.yml                              XcodeGen spec — the real project definition
 build-widget                             install / uninstall / release
 Signing.xcconfig.example                 template for the gitignored Team ID file
+App/HostMain.swift                       entry point; `--placed-widgets` CLI mode
 App/CswapWidgetHostApp.swift             stub host window
 App/CswapWidgetHost.entitlements         sandbox, no exceptions
 Shared/Snapshot.swift                    schema-v1 decoding (shared with the tests)
 Shared/Display.swift                     pure display logic: ramp, severity, paging, trend
 Shared/Navigation.swift                  list navigation state: select, back, scroll, resolve
+Shared/AutoswitchToggle.swift            toggle request file + pending-state resolution
 Widget/CswapWidgetBundle.swift           @main WidgetBundle
 Widget/CswapWidget.swift                 provider, Appearance override, widget definition
-Widget/Intents.swift                     Appearance config intent, ‹ › page, select, scroll and
-                                         refresh intents, page + nav stores
+Widget/Intents.swift                     Appearance config intent, ‹ › page, select, scroll,
+                                         refresh and auto-switch intents, page/nav/toggle stores
 Widget/Components.swift                  ring, bar, badges, window row, pager
 Widget/Pages.swift                       small and medium layouts
 Widget/LargePages.swift                  large layout, pace + trend panels
 Widget/ExtraLargePage.swift              extra-large master-detail
 Widget/DetailPages.swift                 per-account detail page
-Widget/SnapshotFile.swift                the only place the snapshot path is decided
-Widget/CswapWidgetExtension.entitlements sandbox + the one snapshot read exception
+Widget/SnapshotFile.swift                the only place the snapshot and request paths are decided
+Widget/CswapWidgetExtension.entitlements sandbox + snapshot read + request-drop write exceptions
 Tests/SnapshotGoldenTests.swift          decodes ../tests/fixtures/snapshot_golden.json
 Tests/AutoswitchFixtureTests.swift       decodes Tests/Fixtures/snapshot_autoswitch.json
 Tests/DisplayTests.swift                 Shared/Display.swift
+Tests/AutoswitchToggleTests.swift        Shared/AutoswitchToggle.swift
 ```
 
 `CswapWidget.xcodeproj`, `Signing.xcconfig`, `build/` and both generated
@@ -230,21 +274,24 @@ never sees it half-written.
 ## Status
 
 All four sizes (small, medium, large, extra-large), a per-widget Appearance
-setting (System/Light/Dark, from Edit Widget), and a read-only auto-switch
-status line. Small, medium and large page with ‹ ›, with a detail page per
+setting (System/Light/Dark, from Edit Widget), and an auto-switch line with a
+toggle on large and extra-large. When the snapshot is more than 3 minutes old
+the header says "Backend not running · updated 13m ago" instead of the time
+(shortened to fit beside the large pager). Small, medium and large page with ‹ ›, with a detail page per
 account.
 
 Extra-large is master-detail with no pager. The left column lists the
-accounts; each row is a button that selects it (default: the active account).
-When the list overflows, ▲/▼ move it a window at a time -- widgets cannot
-scroll. The right column shows the selected account's weekly pace, its details
+accounts, five per window; each row is a button that selects it (default: the
+active account) and shows 5h and weekly usage with their resets (the 5h one
+ticking, the weekly one as `3d 11h`). When the list overflows, ▲/▼ move it a
+window at a time -- widgets cannot scroll. The right column shows the selected account's weekly pace, its details
 and windows, and the 5h trend with its line emphasized. A tap that misses every
 control reloads the widget rather than opening the stub host app.
 
 The trend's time axis spans the history actually held: from the oldest sample
-(at most 24h back) to now, never narrower than an hour, with the caption and
-axis hints following it (`last 40m`, `last 6h`, `last 24h`). Switch markers
-outside the axis are not drawn.
+or auto-switch (at most 24h back) to now, never narrower than an hour, with
+the caption and axis hints following it (`last 40m`, `last 6h`, `last 24h`).
+Switches older than 24h are not drawn.
 
 The `autoswitch` block and 5h `history` are additive and optional: without them
 the threshold defaults to 90%, next-up is omitted and the extra-large trend

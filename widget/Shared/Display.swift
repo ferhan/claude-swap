@@ -10,6 +10,9 @@ enum Display {
     static let warningPct = 70.0
     /// A measurement older than this is drawn dimmed with its age beside it.
     static let staleAfterSeconds = 600.0
+    /// A snapshot older than this means the backend is not republishing it:
+    /// the backend polls every 60s, so three missed polls.
+    static let backendStaleAfterSeconds = 180.0
     /// Model-scoped rows shown per account card.
     static let maxScopedRows = 4
 }
@@ -29,6 +32,12 @@ extension Snapshot {
     var activeAccount: Account? { accounts.first { $0.active } }
 
     func account(number: Int) -> Account? { accounts.first { $0.number == number } }
+
+    /// The backend has stopped republishing: the whole snapshot is old, not
+    /// just one account's measurement.
+    func isBackendStale(now: Date) -> Bool {
+        now.timeIntervalSince(takenAt) > Display.backendStaleAfterSeconds
+    }
 
     /// The backend's next switch target, when it published one.
     var nextCandidate: Account? {
@@ -167,6 +176,11 @@ enum Format {
         if secs < 3_600 { return "\(secs / 60)m ago" }
         if secs < 86_400 { return "\(secs / 3_600)h ago" }
         return "\(secs / 86_400)d ago"
+    }
+
+    /// The header's cue for a snapshot nobody is republishing.
+    static func backendDown(age seconds: Double) -> String {
+        "Backend not running · updated \(age(seconds: seconds))"
     }
 
     /// A duration for the trend's caption and axis: `40m`, `1h 30m`, `6h`.
@@ -330,7 +344,7 @@ enum Trend {
     /// fixed 24h, so a backend that started 40 minutes ago draws a readable
     /// line instead of a sliver at the right edge.
     struct Span: Equatable, Sendable {
-        /// Left edge of the axis: the oldest sample, widened to `minSpan`.
+        /// Left edge of the axis: the oldest sample or switch, widened to `minSpan`.
         let start: Date
         let end: Date
         /// How much history there is, which can be less than the axis.
@@ -347,13 +361,16 @@ enum Trend {
         }
     }
 
-    /// From max(oldest sample, now-24h) to now, at least `minSpan` wide. With
-    /// no samples at all it is the full 24h (the chart then says so anyway).
+    /// From the oldest thing worth drawing -- a sample or an auto-switch --
+    /// within the last 24h, to now, at least `minSpan` wide. With neither it
+    /// is the full 24h (the chart then says so anyway).
     static func span(_ snapshot: Snapshot, now: Date) -> Span {
-        let oldest = snapshot.accounts
+        let window = now.addingTimeInterval(-maxSpan)...now
+        let oldestSample = snapshot.accounts
             .compactMap { points($0.usage?.fiveHour?.history, now: now).first?.time }
             .min()
-        let dataStart = oldest ?? now.addingTimeInterval(-maxSpan)
+        let oldestSwitch = (snapshot.autoswitch?.switches ?? []).map(\.date).filter(window.contains).min()
+        let dataStart = [oldestSample, oldestSwitch].compactMap { $0 }.min() ?? window.lowerBound
         let start = min(dataStart, now.addingTimeInterval(-minSpan))
         return Span(start: start, end: now, covered: now.timeIntervalSince(dataStart))
     }

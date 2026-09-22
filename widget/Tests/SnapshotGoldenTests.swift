@@ -227,10 +227,15 @@ final class SnapshotGoldenTests: XCTestCase {
         XCTAssertEqual(snapshot.accounts[2].usage?.fiveHour?.history?.count, 0)
 
         XCTAssertTrue(Trend.hasData(snapshot, now: snapshot.takenAt))
-        // History covers only the last ten minutes, so the axis zooms to its
-        // one-hour floor and the switch two hours back falls outside it.
-        XCTAssertEqual(Trend.span(snapshot, now: snapshot.takenAt).duration, Trend.minSpan)
-        XCTAssertEqual(Trend.span(snapshot, now: snapshot.takenAt).caption, "last 10m")
-        XCTAssertEqual(Trend.switchMarkers(snapshot, now: snapshot.takenAt), [])
+        // History covers only the last ten minutes, but the switch two hours
+        // back widens the axis to reach it, so its marker is drawn.
+        XCTAssertEqual(Trend.span(snapshot, now: snapshot.takenAt).duration, 2 * 3_600)
+        XCTAssertEqual(Trend.span(snapshot, now: snapshot.takenAt).caption, "last 2h")
+        let markers = Trend.switchMarkers(snapshot, now: snapshot.takenAt)
+        XCTAssertEqual(markers.count, 1)
+        XCTAssertEqual(markers.first?.date.timeIntervalSince1970, 1_789_891_428.0)
+        // Account 2 (the "from" side) has no history samples to interpolate
+        // against, so the marker falls back to the threshold.
+        XCTAssertEqual(markers.first?.pct, snapshot.threshold)
     }
 }

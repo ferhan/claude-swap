@@ -173,23 +173,23 @@ final class DisplayTests: XCTestCase {
         XCTAssertEqual(extraLarge.selectedAccountNumber, 1)
     }
 
-    func testExtraLargeListOverflowsInWindowsOfSix() throws {
+    func testExtraLargeListOverflowsInWindowsOfFive() throws {
         let snapshot = try golden(copies: 9)
         let chunks = Navigation.listChunks(for: .extraLarge, snapshot: snapshot)
-        XCTAssertEqual(chunks.map(\.count), [6, 3])
+        XCTAssertEqual(chunks.map(\.count), [5, 4])
         XCTAssertEqual(Navigation.listChunks(for: .extraLarge, snapshot: try golden()).count, 1)
     }
 
     func testScrollMovesByAWindowAndClamps() throws {
         let chunks = Navigation.listChunks(for: .extraLarge, snapshot: try golden(copies: 14))
-        XCTAssertEqual(chunks.map(\.count), [6, 6, 2])
+        XCTAssertEqual(chunks.map(\.count), [5, 5, 4])
         var state = NavState()
         state = Navigation.scroll(state, by: 1, chunks: chunks)
-        XCTAssertEqual(state.listOffset, 6)
+        XCTAssertEqual(state.listOffset, 5)
         state = Navigation.scroll(state, by: 1, chunks: chunks)
-        XCTAssertEqual(state.listOffset, 12)
+        XCTAssertEqual(state.listOffset, 10)
         state = Navigation.scroll(state, by: 1, chunks: chunks)
-        XCTAssertEqual(state.listOffset, 12, "clamps at the last window")
+        XCTAssertEqual(state.listOffset, 10, "clamps at the last window")
         state = Navigation.scroll(state, by: -5, chunks: chunks)
         XCTAssertEqual(state.listOffset, 0, "clamps at the first window")
         state = Navigation.scroll(state, by: -1, chunks: chunks)
@@ -200,7 +200,7 @@ final class DisplayTests: XCTestCase {
         // Rows shrank from 14 to 9 while the list was on its third window.
         let snapshot = try golden(copies: 9)
         let resolved = Navigation.resolve(NavState(listOffset: 12), snapshot: snapshot, family: .extraLarge)
-        XCTAssertEqual(resolved.listOffset, 6)
+        XCTAssertEqual(resolved.listOffset, 5)
         // Mid-window offsets snap to their window's start.
         XCTAssertEqual(Navigation.resolve(NavState(listOffset: 4), snapshot: snapshot,
                                           family: .extraLarge).listOffset, 0)
@@ -214,6 +214,10 @@ final class DisplayTests: XCTestCase {
         XCTAssertEqual(decoded, state)
     }
 
+}
+
+// Split from the class body only to keep it under the lint length limit.
+extension DisplayTests {
     // MARK: - Trend span
 
     private func snapshot(historyAges ages: [[TimeInterval]], now: Date) throws -> Snapshot {
@@ -270,26 +274,51 @@ final class DisplayTests: XCTestCase {
         XCTAssertEqual(Format.span(seconds: 11.6 * 3_600), "12h")
     }
 
-    func testSwitchMarkersAreClippedToTheSpan() throws {
+    func testSwitchesWidenTheSpanWithin24h() throws {
         let now = Date(timeIntervalSince1970: 1_000_000)
         let base = try snapshot(historyAges: [[40 * 60, 0]], now: now)
         let iso = ISO8601DateFormatter()
         func at(_ age: TimeInterval) -> String { iso.string(from: now.addingTimeInterval(-age)) }
-        // Axis is the last hour: the 30m-ago switch shows, the 3h-ago one does not.
+        // History covers 40m, but the 3h-ago switch pulls the axis back to
+        // reach it; the 30h-ago one is past 24h and neither widens nor shows.
         let json = """
         {"schemaVersion":1,"takenAt":"\(at(0))","activeAccountNumber":1,"accounts":[],
          "autoswitch":{"enabled":true,"threshold":90,"nextCandidateNumber":null,
-           "switches":[{"at":"\(at(3 * 3_600))","from":1,"to":2},{"at":"\(at(30 * 60))","from":1,"to":2},
-                       {"at":"\(at(10 * 60))","from":7,"to":1}]}}
+           "switches":[{"at":"\(at(30 * 3_600))","from":1,"to":2},{"at":"\(at(3 * 3_600))","from":1,"to":2},
+                       {"at":"\(at(30 * 60))","from":1,"to":2},{"at":"\(at(10 * 60))","from":7,"to":1}]}}
         """
         let events = try Snapshot.decode(Data(json.utf8)).autoswitch
         let merged = Snapshot(schemaVersion: 1, takenAt: now, activeAccountNumber: 1,
                               accounts: base.accounts, autoswitch: events)
+        let span = Trend.span(merged, now: now)
+        XCTAssertEqual(span.start, now.addingTimeInterval(-3 * 3_600))
+        XCTAssertEqual(span.caption, "last 3h")
         let markers = Trend.switchMarkers(merged, now: now)
-        XCTAssertEqual(markers.map(\.date), [now.addingTimeInterval(-30 * 60), now.addingTimeInterval(-10 * 60)])
-        XCTAssertEqual(markers.first?.pct, 50)
-        // No history for the "from" account: the marker sits on the threshold.
-        XCTAssertEqual(markers.last?.pct, 90)
+        XCTAssertEqual(markers.map(\.date), [-3 * 3_600, -30 * 60, -10 * 60].map { now.addingTimeInterval($0) })
+        // On the "from" line where it has samples; else on the threshold.
+        XCTAssertEqual(markers.map(\.pct), [90, 50, 90])
+    }
+
+    func testSwitchesAloneStillGetTheOneHourFloor() throws {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let iso = ISO8601DateFormatter()
+        let json = """
+        {"schemaVersion":1,"takenAt":"\(iso.string(from: now))","activeAccountNumber":null,"accounts":[],
+         "autoswitch":{"enabled":true,"threshold":90,"nextCandidateNumber":null,
+           "switches":[{"at":"\(iso.string(from: now.addingTimeInterval(-10 * 60)))","from":1,"to":2}]}}
+        """
+        let span = Trend.span(try Snapshot.decode(Data(json.utf8)), now: now)
+        XCTAssertEqual(span.duration, Trend.minSpan)
+        XCTAssertEqual(span.caption, "last 10m")
+    }
+
+    // MARK: - Backend staleness
+
+    func testBackendStaleAfterThreeMinutes() throws {
+        let snapshot = try golden()
+        XCTAssertFalse(snapshot.isBackendStale(now: snapshot.takenAt.addingTimeInterval(180)))
+        XCTAssertTrue(snapshot.isBackendStale(now: snapshot.takenAt.addingTimeInterval(181)))
+        XCTAssertEqual(Format.backendDown(age: 13 * 60), "Backend not running · updated 13m ago")
     }
 
     func testNormalizedWraps() {

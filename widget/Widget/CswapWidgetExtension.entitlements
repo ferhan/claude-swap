@@ -22,5 +22,15 @@
 	<array>
 		<string>/.claude-swap-backup/snapshot.json</string>
 	</array>
+	<!-- The auto-switch toggle's only write: request files dropped into this
+	     one directory, which the backend creates, reads and applies to
+	     settings.json itself. The trailing slash scopes it to the directory's
+	     contents; nothing else in the backup root becomes writable.
+
+	     Must stay in lockstep with SnapshotFile.requestsDirectory. -->
+	<key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
+	<array>
+		<string>/.claude-swap-backup/widget-requests/</string>
+	</array>
 </dict>
 </plist>
