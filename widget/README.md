@@ -188,6 +188,12 @@ stderr and exit 1 (including a 10s timeout). The argument is handled in
 no Dock icon appears. The backend uses it to treat a placed widget as an open
 surface. Each placed widget counts once, whatever its size.
 
+Right after chronod restarts (every `./build-widget install` runs
+`killall chronod`) it answers `{"count": 0}` for a few seconds. So the backend
+never retires on one 0: zero answers (and errors, and a missing app) must hold
+across consecutive checks at least 15s apart. A positive count is cached for
+five minutes; a 0 is never cached.
+
 ## Distribution
 
 The widget ships as a notarized `.dmg` signed with a Developer ID Application

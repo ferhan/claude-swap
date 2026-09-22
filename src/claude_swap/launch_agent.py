@@ -527,6 +527,13 @@ _PLACED_WIDGETS_TIMEOUT_S = 10.0
 # The retire check runs every 5s; widgets are placed and removed by hand, so
 # a few minutes of lag is fine and saves spawning the app 60 times a minute.
 _PLACED_WIDGETS_CACHE_S = 300.0
+# Right after chronod restarts (every widget install runs `killall chronod`)
+# the host app answers {"count": 0} for a few seconds. So "none placed" must
+# hold across answers at least this far apart before the backend retires...
+_PLACED_WIDGETS_CONFIRM_S = 15.0
+# ...and those answers must be consecutive checks: a zero from before a
+# surface was open (no checks run meanwhile) does not vouch for a new one.
+_PLACED_WIDGETS_STREAK_GAP_S = 60.0
 
 
 def widget_host_executable(home: Path | None = None) -> Path:
@@ -535,29 +542,47 @@ def widget_host_executable(home: Path | None = None) -> Path:
 
 
 class PlacedWidgets:
-    """How many cswap widgets are placed, cached for a few minutes.
+    """How many cswap widgets are placed; a positive answer is cached for a
+    few minutes.
 
-    Unknown (no app, timeout, bad exit, unparsable output) reads as 0: the
-    backend then retires exactly as it did before widgets counted. Each
-    distinct answer is logged once to stderr (the backend's ``.err`` log),
-    so a missing app is one line, not one every five minutes.
+    Unknown (no app, timeout, bad exit, unparsable output) reads as 0. A 0 is
+    never cached and never taken on one answer: :meth:`none_placed` wants it
+    confirmed (see ``_PLACED_WIDGETS_CONFIRM_S``) before the backend retires.
+    Each distinct answer is logged once to stderr (the backend's ``.err``
+    log), so a missing app is one line, not one every check.
     """
 
     def __init__(self, clock=time.monotonic) -> None:
         self._clock = clock
         self._cached: tuple[float, int] | None = None
         self._last_logged: str | None = None
+        # When the current run of zero answers began, and the latest of them.
+        self._zero_since: float | None = None
+        self._zero_last: float | None = None
 
     def count(self, home: Path | None = None) -> int:
         now = self._clock()
         if self._cached is not None and now - self._cached[0] < _PLACED_WIDGETS_CACHE_S:
             return self._cached[1]
         count, note = self._query(home)
-        self._cached = (now, count)
+        if count:
+            self._cached = (now, count)
+            self._zero_since = self._zero_last = None
+        else:
+            self._cached = None
+            if self._zero_last is None or now - self._zero_last > _PLACED_WIDGETS_STREAK_GAP_S:
+                self._zero_since = now
+            self._zero_last = now
         if note != self._last_logged:
             self._last_logged = note
             print(f"backend: {note}", file=sys.stderr, flush=True)
         return count
+
+    def none_placed(self, home: Path | None = None) -> bool:
+        """True once consecutive answers of 0 span ``_PLACED_WIDGETS_CONFIRM_S``."""
+        if self.count(home) > 0:
+            return False
+        return self._clock() - self._zero_since >= _PLACED_WIDGETS_CONFIRM_S
 
     @staticmethod
     def _query(home: Path | None) -> tuple[int, str]:
@@ -605,9 +630,10 @@ def retire_backend_if_idle(
     A lifecycle decision already in flight means a surface is opening: skip
     this round rather than wait on it.
 
-    A placed widget also keeps it (see :class:`PlacedWidgets`). The plist
-    then stays too, so ``RunAtLoad`` brings the backend back at login for
-    the widget. The host app is asked outside the lifecycle lock — it can
+    A placed widget also keeps it (see :class:`PlacedWidgets`), and "no
+    widget placed" counts only once confirmed across checks at least
+    ``_PLACED_WIDGETS_CONFIRM_S`` apart. The plist then stays too, so
+    ``RunAtLoad`` brings the backend back at login for the widget. The host app is asked outside the lifecycle lock — it can
     take seconds, and surfaces opening wait on that lock — and the surfaces
     are checked again under it before the plist goes.
     """
@@ -630,6 +656,6 @@ def retire_backend_if_idle(
 
     if not idle(retire=False):
         return False
-    if (widgets or _placed_widgets).count(home) > 0:
+    if not (widgets or _placed_widgets).none_placed(home):
         return False
     return idle(retire=True)

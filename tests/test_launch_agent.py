@@ -748,9 +748,20 @@ class TestOpenSurface:
 class TestRetireBackendIfIdle:
     """Last one out stops the backend, whatever autoswitch.enabled says."""
 
+    @staticmethod
+    def _no_widgets(home: Path) -> "launch_agent.PlacedWidgets":
+        """A probe whose "none placed" (no host app) is already confirmed."""
+        now = [0.0]
+        widgets = launch_agent.PlacedWidgets(clock=lambda: now[0])
+        widgets.count(home)
+        now[0] = launch_agent._PLACED_WIDGETS_CONFIRM_S
+        return widgets
+
     def test_retires_and_removes_its_plist_when_no_surface_is_open(self, tmp_path):
         _install_plist(tmp_path, launch_agent.AUTO_LABEL, [*PROGRAM, "auto"])
-        assert launch_agent.retire_backend_if_idle(tmp_path, home=tmp_path) is True
+        assert launch_agent.retire_backend_if_idle(
+            tmp_path, home=tmp_path, widgets=self._no_widgets(tmp_path)
+        ) is True
         # Gone from disk, so it is not started again at login.
         assert not launch_agent.plist_path(launch_agent.AUTO_LABEL, tmp_path).exists()
 
@@ -772,7 +783,9 @@ class TestRetireBackendIfIdle:
         stale = locking.surfaces_dir(tmp_path) / "tui-99999.lock"
         stale.parent.mkdir(parents=True)
         stale.touch()
-        assert launch_agent.retire_backend_if_idle(tmp_path, home=tmp_path) is True
+        assert launch_agent.retire_backend_if_idle(
+            tmp_path, home=tmp_path, widgets=self._no_widgets(tmp_path)
+        ) is True
         assert not stale.exists()
 
     def test_defers_while_a_surface_is_mid_decision(self, tmp_path):
@@ -825,15 +838,69 @@ class TestPlacedWidgetsKeepTheBackend:
         # The plist stays, so RunAtLoad brings it back at login for the widget.
         assert launch_agent.plist_path(launch_agent.AUTO_LABEL, tmp_path).exists()
 
-    def test_no_placed_widget_retires(self, tmp_path):
+    def _retire(self, tmp_path, widgets) -> bool:
+        return launch_agent.retire_backend_if_idle(tmp_path, home=tmp_path, widgets=widgets)
+
+    def test_no_placed_widget_retires_once_confirmed(self, tmp_path):
         _install_plist(tmp_path, launch_agent.AUTO_LABEL, [*PROGRAM, "auto"])
         self._app(tmp_path)
-        widgets, run, _ = self._probe(iter([self._done('{"count": 0}')]))
+        now = [0.0]
+        widgets, run, calls = self._probe(
+            iter([self._done('{"count": 0}')] * 2), clock=lambda: now[0]
+        )
         with patch.object(launch_agent.subprocess, "run", run):
-            assert launch_agent.retire_backend_if_idle(
-                tmp_path, home=tmp_path, widgets=widgets
-            ) is True
+            assert self._retire(tmp_path, widgets) is False
+            assert launch_agent.plist_path(launch_agent.AUTO_LABEL, tmp_path).exists()
+            now[0] = launch_agent._PLACED_WIDGETS_CONFIRM_S
+            assert self._retire(tmp_path, widgets) is True
+        assert len(calls) == 2  # a zero is asked again, never cached
         assert not launch_agent.plist_path(launch_agent.AUTO_LABEL, tmp_path).exists()
+
+    def test_a_zero_right_after_chronod_restarts_does_not_retire(self, tmp_path):
+        # chronod answers 0 for a few seconds after a restart, then the truth.
+        _install_plist(tmp_path, launch_agent.AUTO_LABEL, [*PROGRAM, "auto"])
+        self._app(tmp_path)
+        now = [0.0]
+        widgets, run, calls = self._probe(
+            iter([self._done('{"count": 0}'), self._done('{"count": 4}')]),
+            clock=lambda: now[0],
+        )
+        with patch.object(launch_agent.subprocess, "run", run):
+            assert self._retire(tmp_path, widgets) is False
+            now[0] = launch_agent._PLACED_WIDGETS_CONFIRM_S
+            assert self._retire(tmp_path, widgets) is False
+            # The 4 is cached, and it reset the zero streak.
+            now[0] = 2 * launch_agent._PLACED_WIDGETS_CONFIRM_S
+            assert self._retire(tmp_path, widgets) is False
+        assert len(calls) == 2
+        assert launch_agent.plist_path(launch_agent.AUTO_LABEL, tmp_path).exists()
+
+    def test_zeros_closer_than_the_confirm_window_do_not_retire(self, tmp_path):
+        self._app(tmp_path)
+        now = [0.0]
+        widgets, run, _ = self._probe(
+            iter([self._done('{"count": 0}')] * 3), clock=lambda: now[0]
+        )
+        with patch.object(launch_agent.subprocess, "run", run):
+            assert widgets.none_placed(tmp_path) is False
+            now[0] = 5.0
+            assert widgets.none_placed(tmp_path) is False
+            now[0] = launch_agent._PLACED_WIDGETS_CONFIRM_S - 0.1
+            assert widgets.none_placed(tmp_path) is False
+
+    def test_a_stale_zero_does_not_confirm_a_new_one(self, tmp_path):
+        # No checks ran in between (a surface was open): the streak restarts.
+        self._app(tmp_path)
+        now = [0.0]
+        widgets, run, _ = self._probe(
+            iter([self._done('{"count": 0}')] * 3), clock=lambda: now[0]
+        )
+        with patch.object(launch_agent.subprocess, "run", run):
+            assert widgets.none_placed(tmp_path) is False
+            now[0] = 3600.0
+            assert widgets.none_placed(tmp_path) is False
+            now[0] += launch_agent._PLACED_WIDGETS_CONFIRM_S
+            assert widgets.none_placed(tmp_path) is True
 
     @pytest.mark.parametrize(
         "answer",
@@ -846,20 +913,27 @@ class TestPlacedWidgetsKeepTheBackend:
             OSError("exec format error"),
         ],
     )
-    def test_an_unknown_answer_counts_as_none_and_retires(self, tmp_path, answer, capsys):
+    def test_an_unknown_answer_counts_as_none_and_retires_once_confirmed(
+        self, tmp_path, answer, capsys
+    ):
         _install_plist(tmp_path, launch_agent.AUTO_LABEL, [*PROGRAM, "auto"])
         self._app(tmp_path)
-        widgets, run, _ = self._probe(iter([answer]))
+        now = [0.0]
+        widgets, run, _ = self._probe(iter([answer, answer]), clock=lambda: now[0])
         with patch.object(launch_agent.subprocess, "run", run):
-            assert launch_agent.retire_backend_if_idle(
-                tmp_path, home=tmp_path, widgets=widgets
-            ) is True
+            assert self._retire(tmp_path, widgets) is False
+            now[0] = launch_agent._PLACED_WIDGETS_CONFIRM_S
+            assert self._retire(tmp_path, widgets) is True
         assert "unknown" in capsys.readouterr().err
 
     def test_a_missing_app_retires_without_spawning(self, tmp_path, capsys):
-        widgets, run, calls = self._probe(iter([]))
+        now = [0.0]
+        widgets, run, calls = self._probe(iter([]), clock=lambda: now[0])
         with patch.object(launch_agent.subprocess, "run", run):
             assert widgets.count(tmp_path) == 0
+            assert self._retire(tmp_path, widgets) is False
+            now[0] = launch_agent._PLACED_WIDGETS_CONFIRM_S
+            assert self._retire(tmp_path, widgets) is True
         assert calls == []
         assert "no widget host app" in capsys.readouterr().err
 
