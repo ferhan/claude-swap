@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1156,6 +1157,57 @@ class TestAutoCommand:
         cli._watch_widget_requests(_Engine(), tmp_path, done)
         assert _Engine.woken == 2
 
+    def test_a_switch_click_made_while_down_does_not_run_at_startup(self, temp_home):
+        """A stale switch request is dropped on start, never applied."""
+        from claude_swap import widget_requests
+        from claude_swap.paths import get_backup_root
+
+        folder = widget_requests.ensure_requests_dir(get_backup_root())
+        stale_ms = int((time.time() - 3600) * 1000)
+        (folder / f"switch-{stale_ms}.json").write_text(
+            json.dumps({"switch": {"to": 2}, "at": "x"})
+        )
+        with patch.object(cli, "_retire_when_idle", lambda *a: None), patch.object(
+            cli.ClaudeAccountSwitcher, "switch_to"
+        ) as switch_to:
+            assert self._run(["--json", "--backend"], temp_home) == 0
+        switch_to.assert_not_called()
+        assert list(folder.iterdir()) == []
+        assert not getattr(self.FakeEngine.instances[-1], "woken", 0)
+
+    def test_an_applied_switch_request_wakes_the_engine(self, monkeypatch, tmp_path):
+        """The tick republishes the snapshot with the new active account."""
+        made = []
+
+        def apply(_dir, make_switcher):
+            made.append(make_switcher)
+            return True
+
+        monkeypatch.setattr("claude_swap.widget_requests.apply_switch_request", apply)
+        engine = self.FakeEngine(None, None, None)
+        cli._apply_widget_requests(engine, tmp_path)
+        assert engine.woken == 1
+        # The switch path gets a switcher of its own, as `cswap switch` does.
+        assert made == [cli.ClaudeAccountSwitcher]
+
+    def test_a_refused_switch_request_does_not_wake(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            "claude_swap.widget_requests.apply_switch_request", lambda *_: False
+        )
+        engine = self.FakeEngine(None, None, None)
+        cli._apply_widget_requests(engine, tmp_path)
+        assert not getattr(engine, "woken", 0)
+
+    def test_a_failing_switch_request_does_not_end_the_watch(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        def boom(*_):
+            raise RuntimeError("keychain gone")
+
+        monkeypatch.setattr("claude_swap.widget_requests.apply_switch_request", boom)
+        cli._apply_widget_requests(object(), tmp_path)
+        assert "could not apply switch request: keychain gone" in capsys.readouterr().err
+
     def test_a_failing_request_does_not_end_the_watch(self, monkeypatch, tmp_path, capsys):
         def boom(_dir):
             raise OSError("disk full")
@@ -1970,6 +2022,51 @@ class TestServiceCommand:
         out = capsys.readouterr().out
         assert "not running" in out
         assert "not held" in out  # reported even with no service installed
+
+    def test_start_ensures_the_backend_without_a_surface(
+        self, monkeypatch, capsys, temp_home
+    ):
+        """What the widget host app's "Start backend" runs."""
+        from claude_swap import paths
+
+        self._stub_launch_agent(monkeypatch)
+        calls = []
+        monkeypatch.setattr(
+            "claude_swap.launch_agent.open_surface",
+            lambda backup, kind: calls.append((backup, kind)) or (None, True, None),
+        )
+        assert self._run(monkeypatch, ["cswap", "service", "start"]) == 0
+        # kind None: ensure (newest caller wins, lifecycle lock) but register
+        # nothing, so the backend retires unless something keeps it.
+        assert calls == [(paths.get_backup_root(), None)]
+        out = capsys.readouterr().out
+        assert "Backend service: running (pid 4242)" in out  # the status summary
+
+    def test_start_fails_loudly_when_launchd_refuses(
+        self, monkeypatch, capsys, temp_home
+    ):
+        self._stub_launch_agent(monkeypatch)
+        monkeypatch.setattr(
+            "claude_swap.launch_agent.open_surface",
+            lambda *_: (None, False, "launchctl bootstrap failed (exit 5)"),
+        )
+        assert self._run(monkeypatch, ["cswap", "service", "start"]) == 1
+        captured = capsys.readouterr()
+        assert "Backend not started: launchctl bootstrap failed (exit 5)" in (
+            captured.out + captured.err
+        )
+        assert "Backend service:" not in captured.out
+
+    def test_start_is_macos_only(self, monkeypatch, capsys, temp_home):
+        called = []
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(
+            "claude_swap.launch_agent.open_surface", lambda *a: called.append(a)
+        )
+        assert self._run(monkeypatch, ["cswap", "service", "start"]) == 1
+        captured = capsys.readouterr()
+        assert "only available on macOS" in captured.out + captured.err
+        assert called == []
 
     def test_bare_service_is_status(self, monkeypatch, capsys, temp_home):
         self._stub_launch_agent(monkeypatch)

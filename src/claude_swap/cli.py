@@ -922,22 +922,34 @@ def _retire_when_idle(engine, backup_dir: Path) -> None:
         _time.sleep(_RETIRE_CHECK_SECONDS)
 
 
-# The widget's auto-switch toggle drops request files (see widget_requests).
-# Polled on its own 1s timer: the engine can sleep for minutes or hours, and
-# the widget shows the new state optimistically until the snapshot agrees.
+# The widget's auto-switch toggle and account rows drop request files (see
+# widget_requests). Polled on its own 1s timer: the engine can sleep for
+# minutes or hours, and the widget shows the new state optimistically until
+# the snapshot agrees.
 _WIDGET_REQUEST_POLL_SECONDS = 1.0
 
 
 def _apply_widget_requests(engine, backup_dir: Path) -> None:
-    """Apply pending widget requests; tick now if the setting changed, so
-    the snapshot republishes with it (the tick re-reads settings.json)."""
+    """Apply pending widget requests; tick now if anything changed, so the
+    snapshot republishes with it (the tick re-reads settings.json and the
+    active account)."""
     from claude_swap import widget_requests
 
+    changed = False
     try:
-        if widget_requests.apply_pending(backup_dir):
-            engine.wake()
+        changed = widget_requests.apply_pending(backup_dir)
     except Exception as e:  # a bad file or a full disk must not end the watch
         print(f"widget: could not apply request: {e}", file=sys.stderr, flush=True)
+    try:
+        # A fresh switcher, as `cswap switch <N>` builds one: the engine's
+        # own is busy on the loop thread, and the switch path's locks are
+        # what serialize the two, exactly as across processes.
+        if widget_requests.apply_switch_request(backup_dir, ClaudeAccountSwitcher):
+            changed = True
+    except Exception as e:
+        print(f"widget: could not apply switch request: {e}", file=sys.stderr, flush=True)
+    if changed:
+        engine.wake()
 
 
 def _watch_widget_requests(engine, backup_dir: Path, done) -> None:
@@ -1167,14 +1179,15 @@ def _menubar_uninstall() -> int:
 
 
 def _service_command(argv: list[str]) -> None:
-    """Handle `cswap service [status|logs]`.
+    """Handle `cswap service [status|logs|start]`.
 
     Pre-dispatched before the main parser is built, like `run`, `auto` and
     `config` (same limitation: `service` must be the first argument). The
     backend is one headless process owning the auto-switch engine; the menu
     bar, the TUI and the widget read what it writes. Nobody installs it:
     opening the TUI or the menu bar starts it, and it retires once the last
-    of them closes. This command only looks at it.
+    of them closes. `status` and `logs` only look at it; `start` is for the
+    widget's host app, which has no surface to open.
     """
     parser = argparse.ArgumentParser(
         prog="cswap service",
@@ -1189,14 +1202,19 @@ def _service_command(argv: list[str]) -> None:
 Examples:
   cswap service status        # running? which build? who holds the engine?
   cswap service logs -f       # follow the event stream
+  cswap service start         # start it without opening a surface
+
+Started by hand, it retires after a short grace unless a TUI, the menu bar
+or a placed widget is keeping it.
 
 A running backend is not the same as opting into automatic switching: until
 autoswitch.enabled is true it polls, evaluates and reports only. Turn it on
 with `cswap config set autoswitch.enabled true`.
         """,
     )
-    sub = parser.add_subparsers(dest="action", metavar="{status,logs}")
+    sub = parser.add_subparsers(dest="action", metavar="{status,logs,start}")
     sub.add_parser("status", help="Is it running, and which build is launchd holding")
+    sub.add_parser("start", help="Make sure it is running this build (macOS)")
     p_logs = sub.add_parser("logs", help="Tail the backend's event stream")
     p_logs.add_argument(
         "-n",
@@ -1218,6 +1236,8 @@ with `cswap config set autoswitch.enabled true`.
     try:
         if action == "logs":
             sys.exit(_service_logs(args.lines, args.follow))
+        if action == "start":
+            sys.exit(_service_start())
         sys.exit(_service_status())
     except ClaudeSwitchError as e:
         error(f"Error: {e}")
@@ -1261,6 +1281,26 @@ def _service_install() -> int:
             )
         )
     return 0
+
+
+def _service_start() -> int:
+    """``cswap service start``: ensure the backend, register no surface.
+
+    The same ``open_surface`` call ``cswap menubar`` makes with no kind, so
+    the lifecycle lock and newest-caller-wins reinstall apply unchanged.
+    Invoked by the widget's host app ("Start backend"); with no surface and
+    no placed widget the backend then retires after its grace, as designed.
+    """
+    from claude_swap import launch_agent
+
+    if sys.platform != "darwin":
+        error("Error: The backend service is only available on macOS.")
+        return 1
+    _, _, backend_error = launch_agent.open_surface(paths.get_backup_root(), None)
+    if backend_error:
+        error(f"Error: Backend not started: {backend_error}")
+        return 1
+    return _service_status()
 
 
 def _service_uninstall() -> int:
@@ -1484,6 +1524,7 @@ Commands:
   %(prog)s menubar                    macOS menu bar app (starts at login)
   %(prog)s menubar --uninstall-service  close it; stop it opening at login
   %(prog)s service status             is the backend running, and which build
+  %(prog)s service start              start the backend without a surface
   %(prog)s upgrade                    self-upgrade to latest
   %(prog)s purge                      remove all claude-swap data
 

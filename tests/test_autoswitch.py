@@ -2247,6 +2247,14 @@ class TestSnapshotAutoswitchAndHistory:
         assert [(s["from"], s["to"]) for s in block["switches"]] == [(1, 2)]
         assert block["switches"][0]["at"].endswith("Z")
 
+    def test_published_file_says_how_to_run_this_cswap(self, temp_home):
+        """The widget's host app runs ``cswapCommand + ["service", "start"]``."""
+        from claude_swap.launch_agent import resolve_program
+
+        h = self._harness(temp_home)
+        self._tick(h, {"1": _usage(10), "2": _usage(40), "3": _usage(5)})
+        assert self._payload()["cswapCommand"] == resolve_program()
+
     def test_next_candidate_null_when_no_target(self, temp_home):
         h = self._harness(temp_home, accounts=1)
         self._tick(h, {"1": _usage(10)})

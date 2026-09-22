@@ -45,6 +45,7 @@ from typing import ClassVar
 from claude_swap import oauth, poll_policy
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.json_output import SCHEMA_VERSION, USAGE_TOKEN_EXPIRED, iso_timestamp
+from claude_swap.launch_agent import resolve_program
 from claude_swap.locking import (
     EngineLock,
     FileLock,
@@ -1106,6 +1107,7 @@ class AutoSwitchEngine:
                     snap,
                     history=history_for(self.switcher.backup_dir, snap),
                     autoswitch=self._autoswitch_block(snap.taken_at),
+                    cswap_command=resolve_program(),
                 ),
             )
         except Exception as e:

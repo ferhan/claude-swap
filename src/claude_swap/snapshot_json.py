@@ -28,6 +28,10 @@ Additive fields (no schema bump; old readers ignore them):
 * top-level ``autoswitch`` — engine state (enabled, effective threshold, next
   candidate, 24h of switches). Only the engine can answer it, so only the
   engine-published file carries it; ``cswap snapshot`` omits the key.
+* top-level ``cswapCommand`` — the argv prefix that runs this cswap
+  (``launch_agent.resolve_program()``, what the backend plist runs), so the
+  widget's host app can run ``cswapCommand + ["service", "start"]``. Engine
+  file only, like ``autoswitch``.
 """
 
 from __future__ import annotations
@@ -184,6 +188,7 @@ def snapshot_payload(
     *,
     history: dict[str, list] | None = None,
     autoswitch: dict | None = None,
+    cswap_command: list[str] | None = None,
 ) -> dict:
     """Project an ``AccountsSnapshot`` to the schema-v1 snapshot payload.
 
@@ -191,7 +196,8 @@ def snapshot_payload(
     payload's own ``takenAt`` can never disagree. ``history`` is
     ``{number: [(t, pct), ...]}`` (see ``UsageHistory.five_hour``); when given,
     every ``fiveHour`` window carries a ``history`` list (empty if the account
-    has none). ``autoswitch`` is the engine's block, emitted verbatim.
+    has none). ``autoswitch`` is the engine's block and ``cswap_command``
+    its argv prefix, both emitted verbatim.
     """
     now = snap.taken_at
     payload = {
@@ -211,6 +217,8 @@ def snapshot_payload(
     }
     if autoswitch is not None:
         payload["autoswitch"] = autoswitch
+    if cswap_command is not None:
+        payload["cswapCommand"] = list(cswap_command)
     return payload
 
 

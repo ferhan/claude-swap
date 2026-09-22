@@ -185,6 +185,7 @@ cswap run 2                     # Run an account in this terminal only (session 
 cswap auto                      # Auto-switch when nearing rate limits (see above)
 cswap service status            # Is the backend running, and which build launchd holds
 cswap service logs -f           # Follow the backend's event stream
+cswap service start             # Start the backend without opening a surface (the widget's "Start backend")
 cswap config                    # Show or edit settings (see Configuration below)
 cswap list                      # Show all accounts with 5h/7d usage and reset times
 cswap list --token-status       # Add source-labelled OAuth token diagnostics

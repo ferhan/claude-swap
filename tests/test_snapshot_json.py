@@ -684,6 +684,10 @@ def _golden_history(backup_dir: Path) -> None:
     history.record_switch(_GOLDEN_NOW - 7200, 2, 1)
 
 
+# What the engine passes as ``cswap_command`` (``launch_agent.resolve_program``).
+_GOLDEN_CSWAP_COMMAND = ["/Users/dev/.local/bin/cswap"]
+
+
 # What the engine passes as ``autoswitch`` (see
 # ``AutoSwitchEngine._autoswitch_block``); pinned here as the shape contract.
 def _golden_autoswitch(backup_dir: Path) -> dict:
@@ -712,10 +716,12 @@ def test_snapshot_matches_the_committed_golden_fixture(frozen_clock, tmp_path):
         snap,
         history=history_for(tmp_path, snap),
         autoswitch=_golden_autoswitch(tmp_path),
+        cswap_command=_GOLDEN_CSWAP_COMMAND,
     )
-    # The one-shot is the same document minus the engine-only block.
+    # The one-shot is the same document minus the engine-only keys.
     one_shot = take_snapshot(_golden_switcher(tmp_path))
-    assert one_shot == {k: v for k, v in payload.items() if k != "autoswitch"}
+    engine_only = {"autoswitch", "cswapCommand"}
+    assert one_shot == {k: v for k, v in payload.items() if k not in engine_only}
 
     if os.environ.get("UPDATE_GOLDEN"):
         _GOLDEN_PATH.write_text(json.dumps(payload, indent=2) + "\n")

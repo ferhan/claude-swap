@@ -235,8 +235,9 @@ What to check:
 - countdowns tick live, second by second, without the widget reloading
 - percentages refresh on the 60s timeline (a **request** — WidgetKit budgets
   reloads and may serve fewer)
-- it is **view-only**: no switching, adding or removing. That is a sandbox
-  consequence, not an omission.
+- it is **view-only** apart from the auto toggle and switching (both request
+  files, below): no adding or removing. That is a sandbox consequence, not an
+  omission.
 - with the backend stopped, the snapshot goes stale and the widget shows old
   data. That is expected — only the backend publishes it. A placed widget
   now keeps the backend up (next section), so this should only happen when
@@ -283,6 +284,64 @@ Also check: two files at once → the larger `epochMillis` wins; a garbage
 file is deleted and changes nothing; a dotfile is left alone. With the
 backend stopped, a dropped file waits and is applied when it next starts.
 
+### Switching from the widget
+
+The widget drops `switch-<epochMillis>.json` in the same directory. Backend
+half without the widget (pick `N` = a managed, enabled, non-active account):
+
+```bash
+d=~/.claude-swap-backup/widget-requests; N=2
+printf '{"switch":{"to":%s},"at":"%s"}' "$N" "$(date -u +%FT%TZ)" > "$d/.tmp"
+mv "$d/.tmp" "$d/switch-$(($(date +%s)*1000)).json"
+```
+
+Within ~1s the file is gone, `cswap status` shows Account-N, `.err` has
+`widget: Switched to Account-N (…), from Account-M (requested …)`, and
+`snapshot.json`'s `activeAccountNumber` is N within a second or two (the
+engine is woken). Then, from the widget itself: tap a row, and the widget
+shows the new active account after its next reload.
+
+Also check:
+
+- **stale is dropped**: name the file 2 minutes back
+  (`switch-$((($(date +%s)-120)*1000)).json`) → deleted, no switch, `.err`
+  has `widget: ignored stale switch request to N (age 120s, …)`.
+- **stale at startup**: stop the backend (close every surface, remove the
+  widget, wait for it to retire), drop a fresh request, wait 70s, start the
+  backend (`cswap service start`) → the file is deleted and the active
+  account does **not** change.
+- two fresh files → only the larger `epochMillis` runs; the other logs
+  `ignored superseded`.
+- unknown `N` (e.g. 99) → `widget: refused switch request to 99: No account
+  found …`; a disabled account → `refused … is disabled`; the active account
+  → `switch request to N: Already on Account-N …`. The file is deleted every
+  time.
+- with auto on and the target at or above the threshold, the engine moves off
+  it on the woken tick. Expected: manual switches get no cooldown (see
+  ARCHITECTURE, Widget requests).
+
+### Start backend (`cswap service start`)
+
+The widget host app's "Start backend" runs `snapshot.json`'s `cswapCommand`
+plus `["service", "start"]`. By hand:
+
+```bash
+jq -c .cswapCommand ~/.claude-swap-backup/snapshot.json   # e.g. ["/Users/me/.local/bin/cswap"]
+.venv/bin/cswap service start; echo $?
+```
+
+1. Backend stopped: prints the `service status` summary with `running (pid …)`,
+   exit 0; `launchctl print gui/$UID/com.cswap.auto` shows the plist's
+   program is this build.
+2. Run it again: same summary, same pid (already running this build — no
+   reinstall).
+3. Run the global install's `cswap service start` after the dev one: the
+   program line flips to the global path (newest caller wins).
+4. No surface, no widget placed: the backend retires after the ~30s grace.
+   With a widget placed it stays.
+5. Failure path: hard to force live; unit-tested (exit 1, `Backend not
+   started: …`).
+
 Rebuild / remove:
 
 ```bash
@@ -299,9 +358,9 @@ strays with `pluginkit -r <path>`.
 
 ## Known gaps — expect these, they are not regressions
 
-- **Placed-widget keep-alive and the request directory have not been run
-  against the real widget/host app** — unit tests stub the subprocess and
-  the files.
+- **Placed-widget keep-alive, the request directory (toggle and switch) and
+  `cswap service start` from the host app have not been run against the real
+  widget/host app** — unit tests stub the subprocess, launchd and the files.
 - **Every rumps-bound menu bar path is untested.** `MenuBarApp` is defined
   inside `run()` and needs a live NSApp, so there is no harness. The pure
   helpers it composes are tested; the wiring is reviewed, not executed.

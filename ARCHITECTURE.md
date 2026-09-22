@@ -8,8 +8,11 @@ agent. The TUI, the menu bar and the macOS widget are three ways to see it.
 None of them does the work itself.
 
 The TUI and the menu bar can also steer it — switch accounts, add and remove
-them, turn auto on and off. The widget cannot: it is **view-only**, for sandbox
-reasons set out in [The widget is view-only](#the-widget-is-view-only).
+them, turn auto on and off. The widget is **view-only**, for sandbox reasons
+set out in [The widget is view-only](#the-widget-is-view-only), with two
+narrow exceptions — turning auto on and off, and switching the active account —
+both carried as request files the backend applies (see
+[Widget requests](#widget-requests)).
 
 ```
             ┌─────────────────────────────────┐
@@ -110,7 +113,7 @@ version, and none should be added.
 | usage store | measured state, atomic fetch claims | backend | all |
 | `settings.json` | policy (`autoswitch.*`) | any surface | backend |
 | `snapshot.json` | display projection | backend | widget |
-| `widget-requests/` | auto on/off requests from the widget | widget | backend |
+| `widget-requests/` | auto on/off and switch requests from the widget | widget | backend |
 | JSONL event stream | engine activity | backend | TUI, menu bar |
 
 This is deliberate. Files survive a crash on either side, need no handshake,
@@ -131,6 +134,13 @@ job because they need a ticker. Everything else stays where it was.
 So "the surfaces talk to the service" is more precisely: *the surfaces share
 state with the service, which is the only participant with a timer.*
 
+**The one exception is the widget's switch request.** The sandboxed widget
+cannot run `cswap switch` itself, so the backend runs it on the widget's
+behalf: the same `switch_to` call, in-process, under the same locks — not a
+second implementation. It is the only user request the backend acts on, and
+it stays that narrow: nothing else is brokered, and every other surface keeps
+switching directly.
+
 ### The snapshot is a public contract
 
 `~/.claude-swap-backup/snapshot.json` is read by a **separately distributed**
@@ -148,7 +158,7 @@ asserted from both sides — a Python test against the producer and a Swift test
 against the decoder. A field renamed on either side fails both.
 
 Changes are additive only; `schemaVersion` stays 1 while old readers keep
-decoding. Two additions are backend-sourced:
+decoding. Three additions are backend-sourced:
 
 - `accounts[].usage.fiveHour.history` — `[{t, pct}]`, 24h, oldest first, at
   most one point per 5 minutes. Kept in `usage_history.json` (backup dir,
@@ -160,6 +170,14 @@ decoding. Two additions are backend-sourced:
   switch now", from where the tick left off) and 24h of real `switches`
   (`{at, from, to}`, same history file). Engine state, so only the
   engine-published file carries it; the one-shot `cswap snapshot` omits it.
+  `switches` records the engine's own switches only; a manual one (CLI, menu
+  bar, widget) is not in it, and the history has no field to tell them apart.
+- top-level `cswapCommand` — the argv prefix that runs this cswap, exactly
+  what `launch_agent.resolve_program()` returns and the backend plist runs
+  (e.g. `["/Users/me/.local/bin/cswap"]`, or `[python, "-m", "claude_swap"]`
+  without a console script). The widget's host app runs `cswapCommand +
+  ["service", "start"]` for its "Start backend" button. Engine file only,
+  like `autoswitch`.
 
 ## How surfaces stay current
 
@@ -264,6 +282,7 @@ cswap                     TUI (also `cswap tui`, `cswap watch`)
 cswap menubar             install + start the menu bar agent, return the prompt
 cswap service status      is the backend running, and which build is launchd holding
 cswap service logs        tail the event stream
+cswap service start       ensure the backend is running, without a surface
 cswap widget install      build and install the widget locally
 ```
 
@@ -354,6 +373,41 @@ mid-fetch). A request matching the current setting is consumed silently.
 Requests made while no backend runs wait in the directory and are applied at
 startup, before the first tick.
 
+**Switch requests** share the directory: `switch-<epochMillis>.json`, same
+temp-and-rename, containing `{"switch": {"to": <account number>}, "at":
+"<ISO8601>"}`. Same 1s pass, same thread. Every `switch-*.json` is deleted
+before anything runs, so a failing switch is never retried; of the valid
+ones only the newest is considered, and only if it is **fresh** — its
+`epochMillis` within 60s of now. Older ones are dropped unapplied with one
+log line each (`widget: ignored stale switch request to N (age …)`).
+
+The freshness rule is why a switch is not an auto toggle. A toggle is a
+setting: applying it late gives the state the user asked for. A switch is an
+act: a click made while the backend was down, applied when it next starts —
+possibly at the next login, hours later — would move the active account out
+from under whatever the user is doing by then. 60s covers a backend busy in
+a tick; anything older is a click the user has moved on from.
+
+The switch itself is `ClaudeAccountSwitcher.switch_to(N, json_output=True)`
+on a fresh switcher, exactly what `cswap switch N` runs, so validation and
+locking are the CLI's: an unknown account, or the switch path refusing, is
+logged as `widget: refused switch request to N: <reason>`; the active
+account is a logged no-op. One deliberate difference: a **disabled** account
+is refused, where `cswap switch N` accepts it — a tap on a dimmed row is far
+likelier a slip than an intent. An applied switch logs one line (`widget:
+Switched to Account-N (email), from Account-M (requested …)`) and wakes the
+engine, which republishes the snapshot with the new `activeAccountNumber`
+within about a second.
+
+It gets the same engine treatment as `cswap switch`, which is **no cooldown**:
+the engine's `lastSwitchAt` cooldown is written only by the engine's own
+switches, and a manual switch never touches `autoswitch_state.json`. What
+protects a manual pick today is the policy itself — the engine does not move
+off an account below the threshold (except under `consume-first`, which may),
+and a manual switch disarms the no-return bar rather than tripping it. A
+manual pick at or above the threshold with auto on will be moved off on the
+next tick; for the widget that tick comes at once, because of the wake.
+
 The menu bar agent is a surface, not the backend, and outlives Quit: its plist
 stays, so it returns at login. *Open at Login* in its menu deletes or rewrites
 that plist without touching launchd (a self-`bootout` would SIGTERM the app
@@ -408,7 +462,7 @@ container. So an intent can change what the widget *shows*, just not what cswap
 | cycle displayed account | small family shows one account; page through them | yes |
 | switch window shown | 5h ⇄ 7d ⇄ per-model | yes |
 | refresh now | `reloadTimelines()`, re-read the snapshot | yes |
-| switch account | — | **no** |
+| switch account | request file, applied by the backend | yes (see [Widget requests](#widget-requests)) |
 | add / remove account | — | **no** |
 
 Seeing every account's limits needs no button: the medium family already
@@ -421,22 +475,23 @@ beat the 60s timeline, and the only relief from "another surface switched and
 the widget hasn't noticed yet" that does not require shipping a resident
 helper.
 
-One exception exists: the auto-switch toggle, which writes a request file
-the backend applies (see [Widget requests](#widget-requests)). It flips one
-policy boolean; it does not touch accounts, the Keychain or `~/.claude.json`.
+Two exceptions exist, both request files the backend applies (see
+[Widget requests](#widget-requests)): the auto-switch toggle, which flips one
+policy boolean, and the switch request, which the backend runs through the
+CLI's own switch path. The widget itself still touches no account, no
+Keychain item and not `~/.claude.json`.
 
 Everything else that mutates state stays in the TUI, the menu bar and the CLI. Do
 **not** grow the stub host app into a second front end — it exists only because
 an extension cannot ship standalone.
 
-#### If widget-initiated switching is ever wanted
+#### Widget-initiated switching
 
-It is additive, not a redesign, and it costs three things: a read-**write**
-exception on a small command file, a command protocol, and the backend watching
-for it. The switch would also be two-step — WidgetKit reloads the timeline when
-the intent completes, which is *before* the backend has acted, so the widget
-would show the old account for one tick and the new one after. Achievable, not
-instant. Not in scope now.
+Built as predicted: additive, on the read-write request directory the toggle
+already had, with the backend watching it. The switch is two-step — WidgetKit
+reloads the timeline when the intent completes, which is *before* the backend
+has acted, so the widget shows the old account until the next reload after the
+backend's republish. Achievable, not instant.
 
 ### Distribution
 
@@ -473,12 +528,16 @@ Not built:
   log path anyone else knows. A hand-run `cswap auto` shows as EXTERNAL, and
   its decisions stay in its own terminal.
 - `cswap widget install` — no install path exists; the widget is built by hand
+- a cooldown for manual switches (CLI, menu bar, widget): the engine's
+  cooldown covers only its own switches — see [Widget requests](#widget-requests)
 - cross-process `wake()`
 
 Untested:
 
-- placed-widget keep-alive and the widget request directory against the
-  real host app and widget (unit-tested with the subprocess and files stubbed)
+- placed-widget keep-alive and the widget request directory (auto toggle and
+  switch requests) against the real host app and widget, and `cswap service
+  start` from the host app (unit-tested with the subprocess, launchd and
+  files stubbed)
 - whether `temporary-exception` passes real notarization (the reasoning is
   sound — it is not profile-gated, and notarization is automated scanning
   rather than the human review that scrutinizes these — but it is unproven

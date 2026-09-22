@@ -155,5 +155,8 @@
         "to": 1
       }
     ]
-  }
+  },
+  "cswapCommand": [
+    "/Users/dev/.local/bin/cswap"
+  ]
 }
