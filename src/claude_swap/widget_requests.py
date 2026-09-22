@@ -7,7 +7,7 @@ temps start with ``.``):
 
 * ``autoswitch-<epochMillis>.json`` — ``{"autoswitch": {"enabled": bool},
   "at": "<ISO8601>"}``. The newest is applied through the same writer as
-  ``cswap config set``, however long it waited.
+  ``cswap config set``, while fresh (``AUTOSWITCH_MAX_AGE_S``).
 * ``switch-<epochMillis>.json`` — ``{"switch": {"to": int}, "at": ...}``. The
   newest is applied through ``switch_to``, the path behind ``cswap switch
   <N>``, but only while fresh (``SWITCH_MAX_AGE_S``): a click made while no
@@ -38,15 +38,31 @@ _SWITCH_NAME = re.compile(r"^switch-(\d+)\.json$")
 # user has forgotten about never fires.
 SWITCH_MAX_AGE_S = 60.0
 
+# And an auto-switch request older than this. Far longer than the switch's
+# bound, because the two requests age differently: flipping auto on or off is
+# a standing preference, so one that waited out a backend restart is still
+# what the user wants, while "switch to Account-3" is a moment's intent. Not
+# unbounded, though — a tap from this morning, applied when the backend
+# happens to come back tonight, is a setting changing on its own.
+AUTOSWITCH_MAX_AGE_S = 15 * 60.0
+
 
 def requests_dir(backup_dir: Path) -> Path:
     return Path(backup_dir) / REQUESTS_DIRNAME
 
 
 def ensure_requests_dir(backup_dir: Path) -> Path:
-    """Create the drop directory (0700) if it is missing."""
+    """Create the drop directory if missing, and make sure it is 0700.
+
+    ``mkdir(mode=...)`` is masked by the process umask and does nothing at all
+    to a directory that already exists, so the mode is asserted separately
+    rather than assumed: this directory is how the widget asks for an account
+    switch, and anyone who can write it can move the active account.
+    """
     path = requests_dir(backup_dir)
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if sys.platform != "win32":
+        path.chmod(0o700)
     return path
 
 
@@ -63,13 +79,16 @@ def _parse(path: Path) -> tuple[bool, str] | None:
     return enabled, at if isinstance(at, str) else "?"
 
 
-def apply_pending(backup_dir: Path) -> bool:
-    """Apply the newest valid request and delete every non-dot file.
+def apply_pending(backup_dir: Path, now: float | None = None) -> bool:
+    """Apply the newest fresh request and delete every non-dot file.
 
     Returns True when ``autoswitch.enabled`` actually changed. Newest is the
-    largest ``epochMillis`` in the name; the ``at`` field is for the log only.
-    Dotfiles are the widget's in-flight temps and are left alone, and switch
-    requests belong to ``apply_switch_request``.
+    largest ``epochMillis`` in the name, which is also where the age comes
+    from (the widget's clock is this machine's clock); the ``at`` field is for
+    the log only. Anything past ``AUTOSWITCH_MAX_AGE_S`` is dropped with a
+    line, exactly as a stale switch request is. Dotfiles are the widget's
+    in-flight temps and are left alone, and switch requests belong to
+    ``apply_switch_request``.
     """
     try:
         entries = [p for p in requests_dir(backup_dir).iterdir()
@@ -79,18 +98,33 @@ def apply_pending(backup_dir: Path) -> bool:
         return False
     if not entries:
         return False
-    newest: tuple[int, str, bool, str] | None = None
+    now = time.time() if now is None else now
+    requests: list[tuple[int, str, bool, str]] = []
     for path in entries:
         match = _REQUEST_NAME.match(path.name)
         parsed = _parse(path) if match else None
         if parsed is not None:
-            key = (int(match.group(1)), path.name, *parsed)
-            if newest is None or key[:2] > newest[:2]:
-                newest = key
+            requests.append((int(match.group(1)), path.name, *parsed))
         path.unlink(missing_ok=True)
+    if not requests:
+        return False
+    requests.sort(reverse=True)
+    newest: tuple[bool, str] | None = None
+    for millis, _, want, at in requests:
+        age = now - millis / 1000.0
+        want_text = str(want).lower()
+        if newest is None and abs(age) <= AUTOSWITCH_MAX_AGE_S:
+            newest = (want, at)
+        elif newest is None:
+            _log(
+                f"ignored stale autoswitch request ({want_text}, age {age:.0f}s, "
+                f"requested {at})"
+            )
+        else:
+            _log(f"ignored superseded autoswitch request ({want_text}, requested {at})")
     if newest is None:
         return False
-    _, _, enabled, at = newest
+    enabled, at = newest
     if load_settings(Path(backup_dir)).enabled == enabled:
         return False
     set_setting(Path(backup_dir), "autoswitch.enabled", "true" if enabled else "false")

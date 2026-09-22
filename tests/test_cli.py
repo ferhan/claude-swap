@@ -1108,7 +1108,10 @@ class TestAutoCommand:
 
         backup = get_backup_root()
         folder = widget_requests.ensure_requests_dir(backup)
-        for millis, enabled in ((1000, False), (2000, True)):
+        # Fresh names: a request is only applied while inside
+        # widget_requests.AUTOSWITCH_MAX_AGE_S.
+        now_ms = int(time.time() * 1000)
+        for millis, enabled in ((now_ms - 2000, False), (now_ms - 1000, True)):
             (folder / f"autoswitch-{millis}.json").write_text(
                 json.dumps({"autoswitch": {"enabled": enabled}, "at": "x"})
             )

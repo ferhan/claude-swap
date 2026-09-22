@@ -10,6 +10,14 @@ from claude_swap import widget_requests
 from claude_swap.settings import load_settings, set_setting
 
 
+NOW = 1_800_000_000.0  # seconds; request names carry milliseconds
+
+
+def _name(seconds_ago: float = 0.0) -> str:
+    """An ``autoswitch-<epochMillis>.json`` name that old, relative to NOW."""
+    return f"autoswitch-{int((NOW - seconds_ago) * 1000)}.json"
+
+
 def _drop(backup: Path, name: str, enabled, at: str = "2026-09-21T22:00:00Z") -> Path:
     path = widget_requests.ensure_requests_dir(backup) / name
     path.write_text(json.dumps({"autoswitch": {"enabled": enabled}, "at": at}))
@@ -23,9 +31,21 @@ def test_the_directory_is_created_private(tmp_path):
     widget_requests.ensure_requests_dir(tmp_path)  # idempotent
 
 
+def test_an_existing_directory_is_corrected_to_0700(tmp_path):
+    # mkdir(mode=) is masked by the umask and does nothing at all to a
+    # directory that is already there — and anyone who can write this one can
+    # move the active account.
+    folder = widget_requests.requests_dir(tmp_path)
+    folder.mkdir(parents=True)
+    folder.chmod(0o755)
+    assert stat.S_IMODE(
+        widget_requests.ensure_requests_dir(tmp_path).stat().st_mode
+    ) == 0o700
+
+
 def test_a_request_sets_autoswitch_enabled(tmp_path, capsys):
-    _drop(tmp_path, "autoswitch-1000.json", True)
-    assert widget_requests.apply_pending(tmp_path) is True
+    _drop(tmp_path, _name(), True)
+    assert widget_requests.apply_pending(tmp_path, now=NOW) is True
     assert load_settings(tmp_path).enabled is True
     raw = json.loads((tmp_path / "settings.json").read_text())
     assert raw["autoswitch"] == {"enabled": True}  # same writer as config set
@@ -34,26 +54,55 @@ def test_a_request_sets_autoswitch_enabled(tmp_path, capsys):
     assert err == ["widget: autoswitch.enabled -> true (requested 2026-09-21T22:00:00Z)"]
 
 
-def test_the_newest_request_wins(tmp_path):
+def test_the_newest_request_wins(tmp_path, capsys):
     # Written out of order: the name's epochMillis decides, not mtime.
-    _drop(tmp_path, "autoswitch-3000.json", False)
-    _drop(tmp_path, "autoswitch-1000.json", True)
-    _drop(tmp_path, "autoswitch-2000.json", True)
+    _drop(tmp_path, _name(1), False)
+    _drop(tmp_path, _name(3), True)
+    _drop(tmp_path, _name(2), True)
     set_setting(tmp_path, "autoswitch.enabled", "true")
-    assert widget_requests.apply_pending(tmp_path) is True
+    assert widget_requests.apply_pending(tmp_path, now=NOW) is True
     assert load_settings(tmp_path).enabled is False
     assert list(widget_requests.requests_dir(tmp_path).iterdir()) == []
+    assert capsys.readouterr().err.count("ignored superseded") == 2
+
+
+def test_a_stale_request_is_deleted_unapplied(tmp_path, capsys):
+    old = widget_requests.AUTOSWITCH_MAX_AGE_S + 60
+    _drop(tmp_path, _name(old), True)
+    assert widget_requests.apply_pending(tmp_path, now=NOW) is False
+    assert not (tmp_path / "settings.json").exists()
+    assert list(widget_requests.requests_dir(tmp_path).iterdir()) == []
+    err = capsys.readouterr().err.strip()
+    assert err == (
+        f"widget: ignored stale autoswitch request (true, age {old:.0f}s, "
+        "requested 2026-09-21T22:00:00Z)"
+    )
+
+
+def test_a_stale_newest_does_not_let_an_older_one_through(tmp_path):
+    # The same rule the switch request keeps: superseded is superseded.
+    _drop(tmp_path, _name(widget_requests.AUTOSWITCH_MAX_AGE_S + 60), True)
+    _drop(tmp_path, _name(widget_requests.AUTOSWITCH_MAX_AGE_S + 120), True)
+    assert widget_requests.apply_pending(tmp_path, now=NOW) is False
+    assert not (tmp_path / "settings.json").exists()
+
+
+def test_a_request_from_just_within_the_window_still_applies(tmp_path):
+    # A backend restart is exactly what this slack is for.
+    _drop(tmp_path, _name(widget_requests.AUTOSWITCH_MAX_AGE_S - 1), True)
+    assert widget_requests.apply_pending(tmp_path, now=NOW) is True
+    assert load_settings(tmp_path).enabled is True
 
 
 def test_invalid_files_are_deleted_and_ignored(tmp_path):
     folder = widget_requests.ensure_requests_dir(tmp_path)
-    _drop(tmp_path, "autoswitch-1000.json", True)
+    _drop(tmp_path, _name(5), True)
     # Newer, but unusable: they must not win, and must not stay.
-    (folder / "autoswitch-5000.json").write_text("{not json")
-    (folder / "autoswitch-6000.json").write_text(json.dumps({"autoswitch": {"enabled": "yes"}}))
-    (folder / "autoswitch-7000.json").write_text(json.dumps([1]))
+    (folder / _name(4)).write_text("{not json")
+    (folder / _name(3)).write_text(json.dumps({"autoswitch": {"enabled": "yes"}}))
+    (folder / _name(2)).write_text(json.dumps([1]))
     _drop(tmp_path, "something-else.json", False)
-    assert widget_requests.apply_pending(tmp_path) is True
+    assert widget_requests.apply_pending(tmp_path, now=NOW) is True
     assert load_settings(tmp_path).enabled is True
     assert list(folder.iterdir()) == []
 
@@ -61,40 +110,38 @@ def test_invalid_files_are_deleted_and_ignored(tmp_path):
 def test_only_invalid_files_change_nothing(tmp_path):
     folder = widget_requests.ensure_requests_dir(tmp_path)
     (folder / "autoswitch-1.json").write_text("")
-    assert widget_requests.apply_pending(tmp_path) is False
+    assert widget_requests.apply_pending(tmp_path, now=NOW) is False
     assert not (tmp_path / "settings.json").exists()
     assert list(folder.iterdir()) == []
 
 
 def test_dotfiles_are_in_flight_and_left_alone(tmp_path):
-    temp = _drop(tmp_path, ".autoswitch-9000.json.tmp", False)
-    assert widget_requests.apply_pending(tmp_path) is False
+    temp = _drop(tmp_path, f".{_name()}.tmp", False)
+    assert widget_requests.apply_pending(tmp_path, now=NOW) is False
     assert temp.exists()
     assert not (tmp_path / "settings.json").exists()
 
 
 def test_a_request_matching_the_setting_is_consumed_quietly(tmp_path, capsys):
     set_setting(tmp_path, "autoswitch.enabled", "true")
-    _drop(tmp_path, "autoswitch-1000.json", True)
-    assert widget_requests.apply_pending(tmp_path) is False
+    _drop(tmp_path, _name(), True)
+    assert widget_requests.apply_pending(tmp_path, now=NOW) is False
     assert list(widget_requests.requests_dir(tmp_path).iterdir()) == []
     assert capsys.readouterr().err == ""
 
 
 def test_a_missing_directory_is_nothing_to_do(tmp_path):
-    assert widget_requests.apply_pending(tmp_path) is False
+    assert widget_requests.apply_pending(tmp_path, now=NOW) is False
 
 
 def test_autoswitch_pass_leaves_switch_requests_alone(tmp_path):
     folder = widget_requests.ensure_requests_dir(tmp_path)
     (folder / "switch-1000.json").write_text(json.dumps({"switch": {"to": 2}}))
-    widget_requests.apply_pending(tmp_path)
+    widget_requests.apply_pending(tmp_path, now=NOW)
     assert [p.name for p in folder.iterdir()] == ["switch-1000.json"]
 
 
 # -- switch requests -----------------------------------------------------------
-
-NOW = 1_800_000_000.0  # seconds; request names carry milliseconds
 
 
 class _Switcher:
