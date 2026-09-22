@@ -112,6 +112,12 @@ FRESHEN_BUFFER_MS = 10 * 60 * 1000
 MAX_SLEEP_S = poll_policy.EXHAUSTED_INTERVAL_S
 NO_RESET_FALLBACK_S = 300.0
 
+# How often a running loop republishes the snapshot, whatever the tick is
+# doing (see ``_start_snapshot_publisher``). Well inside the 180s after which
+# the widget calls the backend stopped, and cheap: a store-only read and one
+# rename.
+SNAPSHOT_PUBLISH_INTERVAL_S = 60.0
+
 # Idle-hold cap (elapsed, not ticks — the hold itself slows the cadence to
 # NO_RESET_FALLBACK_S): an owned-and-expired token normally means Claude Code
 # is idle and will self-heal on next use, but a *dead* refresh token with an
@@ -858,6 +864,11 @@ class AutoSwitchEngine:
         # Cuts the current inter-tick sleep short (a session threshold change
         # from the TUI should show a fresh decision now, not next interval).
         self._wake = threading.Event()
+        # The snapshot publisher (``_start_snapshot_publisher``) and the way a
+        # tick asks it for an extra publish. While the thread runs it is the
+        # only writer of ``snapshot_path``.
+        self._snapshot_thread: threading.Thread | None = None
+        self._snapshot_due = threading.Event()
         self._unhealthy_ticks = 0
         # Both set per tick: a known-reset sleep target, and whether a BLOCKED
         # outcome is static enough (truly exhausted / no candidates) to wait
@@ -1117,6 +1128,61 @@ class AutoSwitchEngine:
         self.settings = settings
         return settings
 
+    def _start_snapshot_publisher(self) -> None:
+        """Publish the snapshot on its own timer for as long as the loop runs.
+
+        Publishing used to happen only at the end of a tick, and a tick is not
+        a heartbeat: ``_next_delay`` sleeps up to ``MAX_SLEEP_S`` when the
+        fleet is blocked, ``NO_RESET_FALLBACK_S`` on an idle hold, and
+        ``autoswitch.intervalSeconds`` may be set as high as an hour. The
+        widget calls a snapshot older than 180s a stopped backend and offers
+        to start the one that is already running. So the file gets a
+        ``SNAPSHOT_PUBLISH_INTERVAL_S`` heartbeat of its own and a tick simply
+        asks for an extra publish (``_snapshot_due``), which keeps a switch
+        visible immediately.
+
+        One writer, not two: while this thread runs it owns the file and
+        ``_publish_snapshot`` only signals it. Each pass is
+        ``SnapshotSource.take(store_only=True)`` exactly as the tick's publish
+        was, so the heartbeat re-serializes what the engine already collected
+        and never generates network traffic of its own. No ``snapshot_path``
+        (``--no-snapshot``, and the in-process engines the TUI and menu bar
+        host) means no thread and nothing written.
+        """
+        if self.snapshot_path is None or self._snapshot_thread is not None:
+            return
+        self._snapshot_thread = threading.Thread(
+            target=self._snapshot_loop, name="cswap-snapshot", daemon=True
+        )
+        self._snapshot_thread.start()
+
+    def _snapshot_loop(self) -> None:
+        while not self._stop.is_set():
+            # Cleared before the write, so a tick that finishes during it is
+            # not lost — it just costs one extra publish.
+            self._snapshot_due.clear()
+            self._write_snapshot()
+            self._snapshot_due.wait(SNAPSHOT_PUBLISH_INTERVAL_S)
+
+    def _stop_snapshot_publisher(self) -> None:
+        """Join the publisher; the loop that fed it has ended."""
+        thread, self._snapshot_thread = self._snapshot_thread, None
+        if thread is None:
+            return
+        self._stop.set()
+        self._snapshot_due.set()
+        thread.join(timeout=SNAPSHOT_PUBLISH_INTERVAL_S)
+
+    def _publish_snapshot(self) -> None:
+        """A tick's publish: hand it to the publisher thread when one runs
+        (``cswap auto`` looping), write it here when none does (``--once``)."""
+        if self.snapshot_path is None:
+            return
+        if self._snapshot_thread is not None:
+            self._snapshot_due.set()
+        else:
+            self._write_snapshot()
+
     def _write_snapshot(self) -> None:
         """Publish the display projection for out-of-process readers.
 
@@ -1245,8 +1311,7 @@ class AutoSwitchEngine:
                 ErrorEvent(message=f"{type(e).__name__}: {e}", transient=True)
             )
             outcome = TickOutcome.ERROR
-        if self.snapshot_path is not None:
-            self._write_snapshot()
+        self._publish_snapshot()
         return outcome
 
     def _tick_inner(self) -> TickOutcome:
@@ -2664,6 +2729,7 @@ class AutoSwitchEngine:
         exits immediately (engines are single-use)."""
         self._stop.set()
         self._wake.set()
+        self._snapshot_due.set()  # wakes the publisher out of its heartbeat
 
     def wake(self) -> None:
         """Cut the current inter-tick sleep short and tick now."""
@@ -2741,9 +2807,11 @@ class AutoSwitchEngine:
         if not self._ensure_engine_lock():
             return 1
         lock = self._engine_lock
+        self._start_snapshot_publisher()
         try:
             return self._run_loop_inner()
         finally:
+            self._stop_snapshot_publisher()
             if lock is not None:
                 lock.release()
 

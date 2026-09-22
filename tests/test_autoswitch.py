@@ -2192,6 +2192,69 @@ class TestSnapshotPublishing:
         assert len(ticks) == 2
 
 
+class TestSnapshotHeartbeat:
+    """A looping engine republishes the snapshot on its own timer.
+
+    A tick is not a heartbeat: ``_next_delay`` sleeps up to ``MAX_SLEEP_S``
+    when the fleet is blocked and ``intervalSeconds`` may be an hour, while
+    the widget reads a snapshot older than 180s as a stopped backend.
+    """
+
+    def _harness(self, temp_home: Path, **kwargs) -> EngineHarness:
+        h = EngineHarness(temp_home)
+        h.seed(1, "a@example.com")
+        h.make_live("a@example.com", 1)
+        h.engine = h._make_engine(**kwargs)
+        return h
+
+    def test_republishes_while_the_tick_sleeps(self, temp_home):
+        h = self._harness(temp_home, snapshot_path=temp_home / "snap.json")
+        published = threading.Event()
+        writes = []
+
+        def publish(path, payload):
+            writes.append(path)
+            if len(writes) >= 3:
+                published.set()
+
+        # One tick, then ~60s of sleep: any publish past the first can only
+        # have come from a timer of its own.
+        with patch("claude_swap.autoswitch.SNAPSHOT_PUBLISH_INTERVAL_S", 0.01), patch(
+            "claude_swap.autoswitch.write_snapshot", side_effect=publish
+        ), patch.object(h.engine, "_tick_inner", return_value=TickOutcome.BLOCKED):
+            loop = threading.Thread(target=h.engine.run_loop, daemon=True)
+            loop.start()
+            try:
+                assert published.wait(10.0), (
+                    "the snapshot was published only by the tick; a blocked "
+                    "engine would leave it stale for minutes"
+                )
+                publisher = h.engine._snapshot_thread
+            finally:
+                h.engine.stop()
+                loop.join(timeout=10.0)
+
+        assert not loop.is_alive()
+        assert publisher is not None and not publisher.is_alive(), (
+            "the publisher must stop with the loop"
+        )
+
+    def test_a_tick_asks_the_publisher_instead_of_writing_itself(self, temp_home):
+        # One owner of the file: two writers would race over the same rename.
+        h = self._harness(temp_home, snapshot_path=temp_home / "snap.json")
+        h.engine._snapshot_thread = threading.current_thread()
+        with patch.object(h.engine, "_write_snapshot") as write:
+            h.engine._publish_snapshot()
+        write.assert_not_called()
+        assert h.engine._snapshot_due.is_set()
+
+    def test_no_snapshot_path_starts_no_publisher(self, temp_home):
+        # `--no-snapshot`, and the engines the TUI and menu bar host.
+        h = self._harness(temp_home)
+        h.engine._start_snapshot_publisher()
+        assert h.engine._snapshot_thread is None
+
+
 class TestSnapshotAutoswitchAndHistory:
     """The engine-only additions: the ``autoswitch`` block and 5h history."""
 
