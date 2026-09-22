@@ -2,18 +2,28 @@ import AppKit
 import os
 import WidgetKit
 
-/// Entry point. Three ways in:
+/// Entry point. **This app has no user interface at all** -- no window, no
+/// menu, no alert, no Dock icon (`LSUIElement`). It exists to be the bundle
+/// the widget extension ships inside and to run `cswap service start` when
+/// the widget asks. Every launch either answers a question and exits or does
+/// its work and quits; none of them can draw anything.
+///
+/// That is deliberate, not an omission. A tap on a widget region that carries
+/// no control falls through to LaunchServices as a plain launch of this app,
+/// and a widget must never answer a tap with a window. There is nothing to
+/// put in one either: accounts, usage, settings and the auto-switch engine
+/// all live in the `cswap` CLI/TUI and the menu bar.
+///
+/// Three ways in:
 ///
 /// - `--placed-widgets`: answers one question for the backend and exits
 ///   without ever creating an NSApplication.
 /// - `claudeswap://start-backend` (the widget's Start control): runs
-///   `cswap service start` and quits. **Nothing is ever drawn on this path**
-///   -- no window, no alert -- because the tap came from a widget and the
-///   answer belongs in the widget: the outcome goes into the markers
-///   `BackendStart` defines, and the detail into `.host.log` beside them.
-///   `LSUIElement` means no Dock icon either.
-/// - A plain launch (Finder, `open -a`): the info window, with a Dock icon for
-///   as long as it is open.
+///   `cswap service start` and quits. The outcome goes into the markers
+///   `BackendStart` defines -- the widget draws "Start failed · Retry" from
+///   them -- and the detail into `.host.log` beside them.
+/// - Anything else (a stray widget tap, Finder, `open -a`, an unknown URL):
+///   a line in `.host.log`, then quit.
 @main
 enum HostMain {
     static func main() {
@@ -32,16 +42,14 @@ enum HostMain {
 @MainActor
 final class HostDelegate: NSObject, NSApplicationDelegate {
     /// How long a launch that says it is plain waits for a URL before it
-    /// opens the info window.
+    /// gives up and quits.
     ///
     /// `launchIsDefaultUserInfoKey` is missing on a cold URL launch, which
     /// reads as "plain", and the URL event can arrive after
-    /// `applicationDidFinishLaunching` anyway. Deciding at that moment is
-    /// what put the info window in front of a Start tap -- the backend did
-    /// start, the window just made it look like nothing had happened.
+    /// `applicationDidFinishLaunching` anyway. Quitting at that moment would
+    /// kill a Start tap before its URL was delivered.
     private static let urlGrace: TimeInterval = 1
 
-    private var window: NSWindow?
     private var starting = false
     private var handledURL = false
 
@@ -52,33 +60,23 @@ final class HostDelegate: NSObject, NSApplicationDelegate {
         guard plainLaunch else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.urlGrace) { [weak self] in
             guard let self, !self.handledURL, !self.starting else { return }
-            HostLog.write("plain launch: info window")
-            self.showInfoWindow()
+            // Nothing asked for anything: a stray widget tap, or someone
+            // opening the app to see what it is. There is no window to show
+            // them, so go away again rather than sit in the process list.
+            HostLog.write("plain launch: nothing to do, quitting")
+            NSApp.terminate(nil)
         }
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
         handledURL = true
         guard urls.contains(where: BackendStart.isStartURL) else {
-            // The info window is for a plain launch only. An unknown URL is
-            // nothing to draw about, so there is nothing left to do.
             HostLog.write("url ignored: \(urls.map(\.absoluteString).joined(separator: " "))")
             NSApp.terminate(nil)
             return
         }
         HostLog.write("url: start-backend")
         startBackend()
-    }
-
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
-
-    private func showInfoWindow() {
-        NSApp.setActivationPolicy(.regular)
-        NSApp.mainMenu = InfoWindow.mainMenu()
-        let window = self.window ?? InfoWindow.make()
-        self.window = window
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate()
     }
 
     private func startBackend() {
@@ -96,7 +94,7 @@ final class HostDelegate: NSObject, NSApplicationDelegate {
         // widget draws "Start failed · Retry" from the marker the starter
         // left, and this reload is what makes it do so.
         WidgetCenter.shared.reloadAllTimelines()
-        if window == nil { NSApp.terminate(nil) }
+        NSApp.terminate(nil)
     }
 }
 
