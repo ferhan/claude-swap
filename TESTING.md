@@ -121,7 +121,7 @@ Expect a refusal naming the holder, and **exit 1**:
 
 ```
 error: another cswap engine already owns this machine's accounts:
-pid NNNNN (/Users/ferhan/src/claude-swap/.venv/bin/cswap auto)
+pid NNNNN (/path/to/claude-swap/.venv/bin/cswap auto)
 — not starting a second one
 ```
 
