@@ -225,15 +225,16 @@ The point of `autoswitch.enabled` living in shared settings is that a toggle
 from any surface reaches the backend without restarting it.
 
 ```bash
-.venv/bin/cswap config get autoswitch.enabled      # false by default
+.venv/bin/cswap config get autoswitch.enabled      # true by default
 ```
 
 Toggle it from the menu bar's "Auto-switch accounts" item, then check the
 backend picked it up on its next tick via `service logs -f`. It re-reads
 settings from disk every tick, so no restart should be needed.
 
-**Default is false.** Installing the backend does not opt you into switching —
-it polls, measures, publishes the snapshot and reports what it *would* do.
+**Default is true.** Set it `false` and the backend keeps polling, measuring,
+publishing the snapshot and reporting what it *would* do, without switching.
+An explicit `false` survives upgrades; only an unset value defaults to on.
 
 ---
 

@@ -249,7 +249,7 @@ uv tool install 'claude-swap[menubar]'   # or: pipx install 'claude-swap[menubar
 cswap menubar
 ```
 
-Shows every account's 5h / 7d / spend usage and switches with a click (specific / rotate / best / next-available), plus the TUI's add / disable-enable / remove / refresh actions. Enable *Settings → Auto-switch accounts* to turn on the same engine as [`cswap auto`](#automatic-switching); it shares the `autoswitch.*` settings, so the menu bar, the TUI and the CLI stay in sync. Off until you turn it on.
+Shows every account's 5h / 7d / spend usage and switches with a click (specific / rotate / best / next-available), plus the TUI's add / disable-enable / remove / refresh actions. *Settings → Auto-switch accounts* controls the same engine as [`cswap auto`](#automatic-switching); it shares the `autoswitch.*` settings, so the menu bar, the TUI and the CLI stay in sync. On by default; untick it there, or `cswap config set autoswitch.enabled false`, to have the engine poll and report without switching.
 
 `cswap menubar` hands the menu bar to launchd and returns the prompt: it starts at login from then on and restarts on crash, with no `.app` bundle. *Quit* in its menu closes it until the next login; untick *Open at Login* first (or run `cswap menubar --uninstall-service`, which also closes it) to keep it from coming back. The engine runs in a small background process that the menu bar and the TUI start on their own and that stops once both are closed; `cswap service status` and `cswap service logs -f` show it.
 

@@ -39,6 +39,7 @@ from claude_swap.autoswitch import (
 from claude_swap.models import AccountsSnapshot
 from claude_swap.settings import (
     SETTING_SPECS,
+    AutoSwitchSettings,
     load_settings,
     parse_model_names,
     set_setting,
@@ -355,7 +356,7 @@ class AutoScreen(Screen):
         try:
             return load_settings(self.app.switcher.backup_dir).enabled
         except Exception:
-            return False
+            return AutoSwitchSettings().enabled  # the default, as the engine would read it
 
     def _set_backend_enabled(self, enabled: bool) -> None:
         try:

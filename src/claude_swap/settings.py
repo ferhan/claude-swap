@@ -44,10 +44,10 @@ class AutoSwitchSettings:
     """
 
     # Master switch. Off means poll-only: the engine measures, evaluates and
-    # reports, but never moves the active account. Default off because a
-    # backend service installed for its measurements must not start rotating
-    # accounts on its own — switching stays something a surface opts into.
-    enabled: bool = False
+    # reports, but never moves the active account. Default on: switching is
+    # what cswap auto is for. Only an unset value falls back to this; an
+    # explicit false in settings.json stays false.
+    enabled: bool = True
     threshold: float = 90.0
     interval_seconds: float = 60.0
     cooldown_seconds: float = 300.0

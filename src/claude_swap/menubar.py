@@ -578,7 +578,7 @@ def run(switcher) -> int:
     )
 
     from claude_swap.autoswitch import AutoSwitchEngine, BackendEventLog
-    from claude_swap.settings import load_settings, set_setting
+    from claude_swap.settings import AutoSwitchSettings, load_settings, set_setting
     from claude_swap.snapshot_source import SnapshotSource
 
     # A surface of the backend, like the TUI: register, then make sure the
@@ -837,7 +837,7 @@ def run(switcher) -> int:
             try:
                 return load_settings(self.switcher.backup_dir).enabled
             except Exception:
-                return False
+                return AutoSwitchSettings().enabled  # the default, as the engine would read it
 
         def _threshold(self) -> int:
             """Current auto-switch threshold from core settings (for the menu)."""

@@ -1505,10 +1505,11 @@ class TestAutoScreen:
     async def test_live_toggle_drives_autoswitch_enabled_for_the_backend(
         self, tmp_path, fake_engine
     ):
-        from claude_swap.settings import load_settings
+        from claude_swap.settings import load_settings, set_setting
         from claude_swap.tui.app import CswapApp
         from claude_swap.tui.modals import ConfirmModal
 
+        set_setting(tmp_path, "autoswitch.enabled", "false")  # on by default: start from off
         fake = FakeSwitcher(
             [make_account(1, active=True), make_account(2)], tmp_path
         )

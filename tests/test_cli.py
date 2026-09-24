@@ -1280,7 +1280,7 @@ class TestAutoCommand:
         out = capsys.readouterr().out
         assert "installed" in out
         assert "/tmp/cswap auto" in out  # which build launchd now holds
-        assert "autoswitch.enabled" in out  # installing is not the opt-in
+        assert "autoswitch.enabled" not in out  # on by default: nothing to warn about
 
     def test_json_stdout_is_pure_jsonl(self, temp_home, capsys):
         from claude_swap.autoswitch import NoSwitchEvent, TickOutcome

@@ -652,9 +652,9 @@ Examples:
   cswap auto --once; echo $?       # single tick, outcome in exit code
   cswap auto --dry-run             # log decisions, never actually switch
 
-Switching is opt-in: until autoswitch.enabled is true the engine polls,
-evaluates and reports, but never moves the active account. Turn it on with
-`cswap config set autoswitch.enabled true` (or the menu bar's toggle).
+Switching is on by default. With autoswitch.enabled false the engine polls,
+evaluates and reports, but never moves the active account. Turn it off with
+`cswap config set autoswitch.enabled false` (or any surface's toggle).
 
 Defaults live in settings.json in the backup root; flags override them.
         """,
@@ -1237,9 +1237,9 @@ Examples:
 Started by hand, it retires after a short grace unless a TUI, the menu bar
 or a placed widget is keeping it.
 
-A running backend is not the same as opting into automatic switching: until
-autoswitch.enabled is true it polls, evaluates and reports only. Turn it on
-with `cswap config set autoswitch.enabled true`.
+The backend switches accounts unless autoswitch.enabled is false, when it
+polls, evaluates and reports only. Turn switching off with
+`cswap config set autoswitch.enabled false`.
         """,
     )
     sub = parser.add_subparsers(dest="action", metavar="{status,logs,start}")
@@ -1301,9 +1301,9 @@ def _service_install() -> int:
         )
     )
     if not load_settings(paths.get_backup_root()).enabled:
-        # Installing the service is not the opt-in to switching; say so
-        # now rather than leaving someone waiting for a switch that the
-        # engine was never going to make.
+        # Switching was turned off explicitly; say so now rather than
+        # leaving someone waiting for a switch that the engine was never
+        # going to make.
         print(
             dimmed(
                 "Switching is off: it polls and reports only, until "

@@ -44,6 +44,7 @@ def test_an_existing_directory_is_corrected_to_0700(tmp_path):
 
 
 def test_a_request_sets_autoswitch_enabled(tmp_path, capsys):
+    set_setting(tmp_path, "autoswitch.enabled", "false")  # on by default: start from off
     _drop(tmp_path, _name(), True)
     assert widget_requests.apply_pending(tmp_path, now=NOW) is True
     assert load_settings(tmp_path).enabled is True
@@ -89,12 +90,14 @@ def test_a_stale_newest_does_not_let_an_older_one_through(tmp_path):
 
 def test_a_request_from_just_within_the_window_still_applies(tmp_path):
     # A backend restart is exactly what this slack is for.
+    set_setting(tmp_path, "autoswitch.enabled", "false")
     _drop(tmp_path, _name(widget_requests.AUTOSWITCH_MAX_AGE_S - 1), True)
     assert widget_requests.apply_pending(tmp_path, now=NOW) is True
     assert load_settings(tmp_path).enabled is True
 
 
 def test_invalid_files_are_deleted_and_ignored(tmp_path):
+    set_setting(tmp_path, "autoswitch.enabled", "false")
     folder = widget_requests.ensure_requests_dir(tmp_path)
     _drop(tmp_path, _name(5), True)
     # Newer, but unusable: they must not win, and must not stay.

@@ -279,13 +279,15 @@ reason the host app stub exists rather than being deleted.
 
 The backend is not "the auto-switcher". It is the thing that does the work;
 auto-switching is one policy it may apply, governed by `autoswitch.enabled`,
-**default false**.
+**default true** -- only an unset value falls back to it; an explicit `false`
+stays false.
 
 - `enabled = false` — polls, maintains the store, publishes the snapshot,
   evaluates, emits events, reports what it *would* do. Never switches.
 - `enabled = true` — the same, and acts on its decisions.
 
-Installing the backend is therefore not opting into automatic switching.
+Turning the policy off (any surface's toggle, or `cswap config set
+autoswitch.enabled false`) keeps the backend running for its measurements.
 Manual switching (`cswap switch`, `cswap run`, the menu bar's account list)
 always works; the engine has explicit handling for a switch that happened
 underneath it, persists cooldown timestamps across processes so it cannot

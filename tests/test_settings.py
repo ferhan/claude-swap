@@ -98,12 +98,17 @@ class TestLoadSettings:
         set_setting(tmp_path, "autoswitch.strategy", "consume-first")
         assert load_settings(tmp_path).strategy == "consume-first"
 
-    def test_switching_is_off_until_someone_turns_it_on(self, tmp_path: Path):
-        # A backend service installed for its measurements must not start
-        # rotating accounts on its own, so the master switch defaults off.
-        assert AutoSwitchSettings().enabled is False
+    def test_switching_is_on_unless_turned_off(self, tmp_path: Path):
+        # Unset -> on: no file, and a file whose autoswitch section omits it.
+        assert AutoSwitchSettings().enabled is True
+        assert load_settings(tmp_path).enabled is True
+        assert SETTING_SPECS["autoswitch.enabled"].default is True
+        set_setting(tmp_path, "autoswitch.threshold", "80")
+        assert load_settings(tmp_path).enabled is True
+
+    def test_an_explicit_false_stays_false(self, tmp_path: Path):
+        set_setting(tmp_path, "autoswitch.enabled", "false")
         assert load_settings(tmp_path).enabled is False
-        assert SETTING_SPECS["autoswitch.enabled"].default is False
 
     def test_enabled_round_trips_through_the_file(self, tmp_path: Path):
         # The channel between the menu bar's toggle and the backend.
