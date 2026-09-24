@@ -4,20 +4,19 @@ import WidgetKit
 // MARK: - Type scale
 
 extension EnvironmentValues {
-    /// Large and extra-large: the legible type scale -- nothing under 11pt,
-    /// numbers in the primary color.
+    /// Large and extra-large: the legible type scale -- nothing under 11pt.
     @Entry var largeType = false
 }
 
 // MARK: - Colors and glyphs
 
 extension Tone {
-    var color: Color {
+    func color(_ scheme: ColorScheme) -> Color {
         switch self {
-        case .green: .green
-        case .yellow: .yellow
-        case .orange: .orange
-        case .red: .red
+        case .green: Palette.pick(scheme, dark: 0x7FD28C, light: 0x2F8F45)
+        case .yellow: Palette.pick(scheme, dark: 0xE8D16A, light: 0xD1A530)
+        case .orange: Palette.pick(scheme, dark: 0xF0A860, light: 0xC07A2A)
+        case .red: Palette.pick(scheme, dark: 0xFF8F76, light: 0xC5392C)
         }
     }
 }
@@ -32,17 +31,17 @@ extension Severity {
         }
     }
 
-    var color: Color {
+    func color(_ scheme: ColorScheme) -> Color {
         switch self {
         case .normal: .primary
-        case .warning: .orange
-        case .critical: .red
+        case .warning: Palette.warning(scheme)
+        case .critical: Palette.critical(scheme)
         }
     }
 }
 
-private func rampGradientStops(_ threshold: Double) -> [Gradient.Stop] {
-    Ramp.stops(threshold: threshold).map { Gradient.Stop(color: $0.tone.color, location: $0.location) }
+private func rampGradientStops(_ threshold: Double, _ scheme: ColorScheme) -> [Gradient.Stop] {
+    Ramp.stops(threshold: threshold).map { Gradient.Stop(color: $0.tone.color(scheme), location: $0.location) }
 }
 
 /// Diagonal bands, cut out of a critical fill so the state reads without color.
@@ -72,6 +71,7 @@ struct PctText: View {
     let threshold: Double
     var font: Font = .caption.weight(.semibold)
     @Environment(\.widgetRenderingMode) private var mode
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         let severity = Severity(pct: pct, threshold: threshold)
@@ -82,7 +82,8 @@ struct PctText: View {
             Text(Format.pct(pct)).monospacedDigit()
         }
         .font(font)
-        .foregroundStyle(mode == .fullColor ? severity.color : .primary)
+        .foregroundStyle(mode != .fullColor ? .primary
+                         : severity == .normal ? Palette.good(scheme) : severity.color(scheme))
         .lineLimit(1)
         .fixedSize()
     }
@@ -98,6 +99,7 @@ struct UsageBar: View {
     var height: CGFloat = 6
     var dimmed = false
     @Environment(\.widgetRenderingMode) private var mode
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         let fraction = min(max(pct / 100, 0), 1)
@@ -129,7 +131,7 @@ struct UsageBar: View {
 
     @ViewBuilder private var fill: some View {
         if mode == .fullColor {
-            LinearGradient(stops: rampGradientStops(threshold), startPoint: .leading, endPoint: .trailing)
+            LinearGradient(stops: rampGradientStops(threshold, scheme), startPoint: .leading, endPoint: .trailing)
         } else {
             Rectangle().fill(.primary).widgetAccentable()
         }
@@ -147,6 +149,7 @@ struct UsageRing: View {
     var lineWidth: CGFloat = 6
     var dimmed = false
     @Environment(\.widgetRenderingMode) private var mode
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         let fraction = min(max((pct ?? 0) / 100, 0), 1)
@@ -179,18 +182,18 @@ struct UsageRing: View {
             let severity = pct.map { Severity(pct: $0, threshold: threshold) } ?? .normal
             VStack(spacing: 0) {
                 Text(pct.map(Format.pct) ?? "—")
-                    .font(.system(size: 14, weight: .bold).monospacedDigit())
-                    .foregroundStyle(mode == .fullColor ? severity.color : .primary)
-                    .minimumScaleFactor(0.8)
+                    .font(.system(size: 16, weight: .bold).monospacedDigit())
+                    .foregroundStyle(mode == .fullColor ? severity.color(scheme) : .primary)
+                    .minimumScaleFactor(minScale(16))
                     .lineLimit(1)
                 HStack(spacing: 2) {
                     if let symbol = severity.symbol {
                         Image(systemName: symbol)
-                            .foregroundStyle(mode == .fullColor ? severity.color : .primary)
+                            .foregroundStyle(mode == .fullColor ? severity.color(scheme) : .primary)
                     }
                     Text("5h").foregroundStyle(.secondary)
                 }
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: 9.5, weight: .semibold))
             }
         }
         .frame(width: size, height: size)
@@ -198,7 +201,7 @@ struct UsageRing: View {
 
     @ViewBuilder private var fill: some View {
         if mode == .fullColor {
-            AngularGradient(stops: rampGradientStops(threshold), center: .center,
+            AngularGradient(stops: rampGradientStops(threshold, scheme), center: .center,
                             startAngle: .degrees(-90), endAngle: .degrees(270))
         } else {
             Rectangle().fill(.primary).widgetAccentable()
@@ -212,6 +215,7 @@ struct InitialsBadge: View {
     let account: Account
     var size: CGFloat = 20
     @Environment(\.widgetRenderingMode) private var mode
+    @Environment(\.colorScheme) private var scheme
     @Environment(\.largeType) private var largeType
 
     var body: some View {
@@ -219,9 +223,9 @@ struct InitialsBadge: View {
         let scaled = size * (account.initials.count > 1 ? 0.42 : 0.5)
         Text(account.initials)
             .font(.system(size: largeType ? max(scaled, 11) : scaled, weight: .bold))
-            .foregroundStyle(accent ? Color.accentColor : .secondary)
+            .foregroundStyle(accent ? Palette.accent(scheme) : .secondary)
             .frame(width: size, height: size)
-            .background(Circle().fill(accent ? Color.accentColor.opacity(0.2) : Color.primary.opacity(0.1)))
+            .background(Circle().fill(accent ? Palette.accent(scheme).opacity(0.22) : Color.primary.opacity(0.1)))
             .widgetAccentable(account.active)
     }
 }
@@ -241,14 +245,15 @@ struct AccountTitle: View {
 struct ActiveMarker: View {
     var showsText = true
     @Environment(\.widgetRenderingMode) private var mode
+    @Environment(\.colorScheme) private var scheme
     @Environment(\.largeType) private var largeType
 
     var body: some View {
         HStack(spacing: 4) {
-            Circle().fill(mode == .fullColor ? Color.green : .primary).frame(width: 6, height: 6)
-            if showsText { Text("Active") }
+            Circle().fill(mode == .fullColor ? Palette.good(scheme) : .primary).frame(width: 6, height: 6)
+            if showsText { Text("Active").foregroundStyle(mode == .fullColor ? Palette.accent(scheme) : .primary) }
         }
-        .font(.system(size: largeType ? 11 : 10, weight: .semibold))
+        .font(.system(size: largeType ? 11 : 10.5, weight: .semibold))
         .widgetAccentable()
         .accessibilityLabel("Active account")
     }
@@ -256,15 +261,19 @@ struct ActiveMarker: View {
 
 struct Tag: View {
     let text: String
+    var accent = false  // "Next", in the accent as the design marks it
+    var uppercased = true  // false for the auth tag: "OAuth", "API Key"
+    @Environment(\.widgetRenderingMode) private var mode
+    @Environment(\.colorScheme) private var scheme
     @Environment(\.largeType) private var largeType
 
     var body: some View {
-        Text(text.uppercased())
-            .font(.system(size: largeType ? 11 : 8.5, weight: .bold))
-            .padding(.horizontal, largeType ? 5 : 4)
-            .padding(.vertical, 1)
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(.secondary, lineWidth: 1))
-            .foregroundStyle(.secondary)
+        let color = accent && mode == .fullColor ? Palette.accent(scheme) : Color.secondary
+        Text(uppercased ? text.uppercased() : text)
+            .font(.system(size: largeType ? 11 : 9.5, weight: .bold))
+            .padding(.horizontal, 4).padding(.vertical, 1)
+            .overlay(RoundedRectangle(cornerRadius: 5).stroke(color, lineWidth: 1))
+            .foregroundStyle(color)
             .fixedSize()
     }
 }
@@ -276,7 +285,7 @@ struct AgeLabel: View {
     var body: some View {
         Label(Format.age(seconds: seconds), systemImage: "clock")
             .labelStyle(.titleAndIcon)
-            .font(.system(size: largeType ? 11 : 9.5))
+            .font(.system(size: largeType ? 11 : 10))
             .foregroundStyle(.secondary)
             .lineLimit(1)
             .fixedSize()
@@ -300,20 +309,19 @@ struct WindowRow: View {
 
     var body: some View {
         if largeType {
-            // Numbers 13pt, in the primary color; the title is the only label.
-            HStack(spacing: compact ? 5 : 6) {
+            HStack(spacing: 7) {
                 Text(title)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .frame(width: titleWidth, alignment: .leading)
                 UsageBar(pct: window.pct, threshold: threshold, dimmed: dimmed)
-                PctText(pct: window.pct, threshold: threshold, font: .system(size: 13, weight: .semibold))
-                    .frame(width: 50, alignment: .trailing)
+                PctText(pct: window.pct, threshold: threshold, font: .system(size: 11, weight: .semibold))
+                    .frame(width: 44, alignment: .trailing)
                 Countdown(resetsAt: window.resetsAt, now: now, ticking: ticking)
-                    .font(.system(size: 13, weight: .medium).monospacedDigit())
-                    .foregroundStyle(.primary)
-                    .frame(width: compact ? 62 : 66, alignment: .trailing)
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 56, alignment: .trailing)
             }
         } else {
             HStack(spacing: compact ? 4 : 6) {
@@ -368,7 +376,7 @@ struct Pager: View {
         HStack(spacing: 5) {
             button(step: -1, symbol: "chevron.left", name: "Previous page")
             Text(label)
-                .font(.system(size: largeType ? 11 : 9.5, weight: .semibold))
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)

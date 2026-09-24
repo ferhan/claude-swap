@@ -69,6 +69,8 @@ final class DisplayTests: XCTestCase {
         XCTAssertEqual(snapshot.accounts[0].subtitle, "Example Org")
         XCTAssertEqual(snapshot.accounts[1].subtitle, "personal")
         XCTAssertEqual(snapshot.accounts[3].subtitle, "API key")
+        XCTAssertEqual(snapshot.accounts[0].authLabel, "OAuth")
+        XCTAssertEqual(snapshot.accounts[3].authLabel, "API Key")
         XCTAssertEqual(snapshot.accounts[3].statusText, "Disabled · no usage quota")
         XCTAssertTrue(snapshot.accounts[1].isStale)
         XCTAssertFalse(snapshot.accounts[0].isStale)

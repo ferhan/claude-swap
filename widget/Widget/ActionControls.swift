@@ -12,16 +12,19 @@ struct ActionChip: View {
     /// Medium's right column is 147pt: the chip drops to the small type scale
     /// there so "Switch to this account" fits whole rather than shortening.
     var compact = false
+    /// Large's account card: 11pt and a slimmer capsule, the height of the
+    /// "Details ›" beside it, so three cards still fit.
+    var dense = false
 
     var body: some View {
         Label(title, systemImage: symbol)
             .labelStyle(.titleAndIcon)
-            .font(.system(size: compact ? 10 : 12, weight: .semibold))
+            .font(.system(size: compact ? 10 : dense ? 11 : 12, weight: .semibold))
             .foregroundStyle(.primary)
             .lineLimit(1)
             .fixedSize()
             .padding(.horizontal, compact ? 6 : 8)
-            .padding(.vertical, compact ? 3 : 4)
+            .padding(.vertical, compact || dense ? 3 : 4)
             .background(Capsule().fill(.primary.opacity(0.1)))
             .overlay(Capsule().stroke(.primary.opacity(0.15), lineWidth: 1))
             .contentShape(Capsule())
@@ -98,10 +101,10 @@ struct StartBackendControl: View {
     }
 }
 
-/// Small's bottom line and medium's, beside the ‹ ›: one spot that carries the
-/// start control, the auto-switch toggle or the switch control, whichever the
-/// state calls for (`CompactSlot` decides). Small has 62pt of it and medium
-/// 77pt, which is what every shortened form in this file is for.
+/// Small's bottom line, beside the ‹ ›: one spot that carries the start
+/// control, the auto-switch toggle or the switch control, whichever the state
+/// calls for (`CompactSlot` decides). Small has 62pt of it, which is what
+/// every shortened form in this file is for. Medium draws both controls.
 struct CompactActionControl: View {
     let account: Account
     let context: PageContext
@@ -139,12 +142,15 @@ struct SwitchControl: View {
     let context: PageContext
     /// Small and medium: the small type scale (see `ActionChip`).
     var compact = false
+    /// Large's account card: the short labels only -- "Switch", not "Switch
+    /// to this account" -- at the full type scale.
+    var short = false
 
     var body: some View {
         let eligibility = account.switchEligibility(activeNumber: context.snapshot.activeAccountNumber)
         if context.isBackendStale && eligibility == .eligible {
             ViewThatFits(in: .horizontal) {
-                StartBackendControl(context: context, compact: compact)
+                if !short { StartBackendControl(context: context, compact: compact) }
                 StartBackendControl(context: context, short: true, compact: compact)
             }
         } else {
@@ -153,7 +159,7 @@ struct SwitchControl: View {
                 ActiveMarker()
             case .notSwitchable:
                 ViewThatFits(in: .horizontal) {
-                    ActionNote(title: "Not switchable", symbol: "nosign", compact: compact)
+                    if !short { ActionNote(title: "Not switchable", symbol: "nosign", compact: compact) }
                     ActionNote(title: "No login", symbol: "nosign", compact: compact)
                 }
                 .accessibilityLabel("Not switchable: no stored login for this account")
@@ -172,14 +178,16 @@ struct SwitchControl: View {
                     }
                 case .notApplied(target: account.number):
                     ViewThatFits(in: .horizontal) {
-                        notApplied("Switch not applied")
+                        if !short { notApplied("Switch not applied") }
                         notApplied("Not applied")
                         switchButton("Retry switch", symbol: "arrow.clockwise")
                         switchButton("Retry", symbol: "arrow.clockwise")
                     }
                 default:
                     ViewThatFits(in: .horizontal) {
-                        switchButton("Switch to this account", symbol: "arrow.left.arrow.right")
+                        if !short {
+                            switchButton("Switch to this account", symbol: "arrow.left.arrow.right")
+                        }
                         switchButton("Switch", symbol: "arrow.left.arrow.right")
                     }
                 }
@@ -196,7 +204,7 @@ struct SwitchControl: View {
 
     private func switchButton(_ title: String, symbol: String) -> some View {
         Button(intent: SwitchAccountIntent(number: account.number)) {
-            ActionChip(title: title, symbol: symbol, compact: compact)
+            ActionChip(title: title, symbol: symbol, compact: compact, dense: short)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Switch to \(account.label)")

@@ -107,7 +107,11 @@ struct EmptyState: View {
     }
 }
 
-// MARK: - Hero (small, medium left column)
+/// Small and medium text shrinks to fit, never below 8pt: the scale factor
+/// for a given base size.
+func minScale(_ size: CGFloat) -> CGFloat { min(1, 8 / size) }
+
+// MARK: - Hero (small; medium left column: gauge and weekly)
 
 struct HeroHeader: View {
     let account: Account
@@ -118,20 +122,19 @@ struct HeroHeader: View {
             InitialsBadge(account: account, size: 20)
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 4) {
-                    AccountTitle(account: account)
+                    AccountTitle(account: account, font: .system(size: 13, weight: .semibold))
+                        .minimumScaleFactor(minScale(13))
                     if showsActiveDot && account.active { ActiveMarker(showsText: false) }
                 }
-                Group {
-                    if account.isStale, let age = account.usageAgeSeconds {
-                        Text("updated \(Format.age(seconds: age))")
-                    } else {
-                        Text(account.subtitle)
-                    }
+                // Only when the numbers are old: the org line is gone.
+                if account.isStale, let age = account.usageAgeSeconds {
+                    Text("updated \(Format.age(seconds: age))")
+                        .font(.system(size: 10))
+                        .minimumScaleFactor(minScale(10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
-                .font(.system(size: 9.5))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
             }
         }
     }
@@ -146,25 +149,46 @@ struct HeroGauge: View {
 
     var body: some View {
         let fiveHour = account.usage?.fiveHour
+        let target = account.usage?.resetTarget(now: context.now) ?? .none
         HStack(spacing: 10) {
             UsageRing(pct: fiveHour?.pct, threshold: context.threshold,
                       size: ringSize, lineWidth: ringSize > 54 ? 7 : 6, dimmed: account.isStale)
             VStack(alignment: .leading, spacing: 1) {
-                Text("RESETS IN")
-                    .font(.system(size: 8.5, weight: .medium))
+                // An exhausted week is what the account waits on: say so.
+                Text(isWeekly(target) ? "7D RESETS IN" : "RESETS IN")
+                    .font(.system(size: 9.5, weight: .medium))
                     .foregroundStyle(.secondary)
-                if let resetsAt = fiveHour?.resetsAt, resetsAt > context.now {
+                    .lineLimit(1)
+                    .minimumScaleFactor(minScale(9.5))
+                switch target {
+                case .countdown(let resetsAt, _):
                     Text(resetsAt, style: .timer)
-                        .font(.system(size: 16, weight: .bold).monospacedDigit())
+                        .font(.system(size: 17, weight: .bold).monospacedDigit())
                         .lineLimit(1)
+                        // Not `minScale(17)`: a timer given room to shrink goes
+                        // all the way down, fitting or not. 0.8 keeps it at 13.6pt.
+                        .minimumScaleFactor(0.8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     Text("at \(resetsAt.formatted(date: .omitted, time: .shortened))")
-                        .font(.system(size: 9.5))
+                        .font(.system(size: 10))
                         .foregroundStyle(.secondary)
-                } else {
-                    Text("—").font(.system(size: 16, weight: .bold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(minScale(10))
+                case .resetting:
+                    Text("Resetting…")
+                        .font(.system(size: 14, weight: .bold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(minScale(14))
+                case .none:
+                    Text("—").font(.system(size: 17, weight: .bold))
                 }
             }
         }
+    }
+
+    private func isWeekly(_ target: ResetTarget) -> Bool {
+        if case .countdown(_, weekly: true) = target { return true }
+        return false
     }
 }
 
@@ -176,10 +200,11 @@ struct HeroWeekly: View {
         if let (title, window) = account.weeklyWindow {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 3) {
-                    Text(title).font(.system(size: 9.5, weight: .medium)).foregroundStyle(.secondary)
+                    Text(title).font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                        .lineLimit(1).minimumScaleFactor(minScale(10))
                     Spacer(minLength: 2)
                     PctText(pct: window.pct, threshold: context.threshold,
-                            font: .system(size: 10, weight: .semibold))
+                            font: .system(size: 10.5, weight: .semibold))
                     if window.aheadOfPace == true {
                         Image(systemName: "arrow.up.right")
                             .font(.system(size: 8, weight: .bold))
@@ -191,6 +216,7 @@ struct HeroWeekly: View {
                             .font(.system(size: 9.5).monospacedDigit())
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
+                            .minimumScaleFactor(minScale(9.5))
                     }
                 }
                 UsageBar(pct: window.pct, threshold: context.threshold, height: 5, dimmed: account.isStale)
@@ -209,6 +235,7 @@ struct NoUsage: View {
             .font(.system(size: largeType ? 12 : 10.5))
             .foregroundStyle(.secondary)
             .lineLimit(2)
+            .minimumScaleFactor(largeType ? 1 : minScale(10.5))
     }
 }
 

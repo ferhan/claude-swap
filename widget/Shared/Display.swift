@@ -13,6 +13,12 @@ enum Display {
     /// A snapshot older than this means the backend is not republishing it:
     /// the backend polls every 60s, so three missed polls.
     static let backendStaleAfterSeconds = 180.0
+    /// Points over expected-by-now that count as ahead of pace: the
+    /// backend's `AHEAD_THRESHOLD_PCT`, used here for the 5h session, which
+    /// the backend does not pace.
+    static let aheadThresholdPct = 15.0
+    /// The 5h window's length.
+    static let sessionPeriod: TimeInterval = 5 * 3_600
     /// Model-scoped rows shown per account card.
     static let maxScopedRows = 4
 }
@@ -45,11 +51,132 @@ extension Snapshot {
     }
 }
 
+/// What a pace panel shows for one window: a verdict and, when there is one,
+/// where usage is expected to be by now.
+struct PaceReading: Equatable {
+    enum Verdict: Equatable { case atLimit, ahead, onPace, tooEarly, unknown, noSession }
+    let verdict: Verdict
+    let expectedPct: Double?
+}
+
+extension Window {
+    /// The weekly window: the producer's pace fields, read as `isAheadOfPace`.
+    func weeklyReading(now: Date) -> PaceReading {
+        if isExhausted { return PaceReading(verdict: .atLimit, expectedPct: nil) }
+        let verdict: PaceReading.Verdict = switch isAheadOfPace {
+        case true?: .ahead
+        case false?: .onPace
+        case nil: isTooEarlyForPace(now: now) ? .tooEarly : .unknown
+        }
+        return PaceReading(verdict: verdict, expectedPct: expectedPct)
+    }
+
+    /// The 5h session, which the producer does not pace: expected-by-now is
+    /// elapsed / 5h, from a start of `resetsAt` - 5h. Ahead is used minus
+    /// expected over the same 15 points the weekly marker uses -- there is no
+    /// run-out projection here to judge by. No `resetsAt`, or one already
+    /// past: no session running.
+    func sessionReading(now: Date) -> PaceReading {
+        if isExhausted { return PaceReading(verdict: .atLimit, expectedPct: nil) }
+        guard let resetsAt, resetsAt > now else { return PaceReading(verdict: .noSession, expectedPct: nil) }
+        let period = Display.sessionPeriod
+        let elapsed = min(max(period - resetsAt.timeIntervalSince(now), 0), period)
+        let expected = elapsed / period * 100
+        let ahead = pct - expected >= Display.aheadThresholdPct
+        return PaceReading(verdict: ahead ? .ahead : .onPace, expectedPct: expected)
+    }
+}
+
+/// What the pace panel says about the rest of a weekly window.
+enum WeeklyOutlook: Equatable {
+    /// At the limit: nothing left to project, only the wait for the reset.
+    case resetsIn(Date)
+    /// At the limit with the reset already past: the next snapshot will show
+    /// the new week. Never a countdown to a moment behind us.
+    case resetting
+    /// The producer's linear projection, before the reset.
+    case runsOut(Date)
+    case lastsToReset
+    case unknown
+}
+
+extension Window {
+    /// At the limit: the producer's own `maxed` rule (`pct >= 100`, see
+    /// `snapshot_json.py`), applied to any window.
+    var isExhausted: Bool { pct >= 100 }
+
+    /// The pace panel's verdict: ahead when the producer flags it, and also
+    /// whenever the projection says the week runs out before its reset -- so
+    /// the label never says "on pace" beside a red "runs out". Nil: unknown.
+    var isAheadOfPace: Bool? {
+        if aheadOfPace == true || willLastToReset == false { return true }
+        return aheadOfPace
+    }
+
+    /// Under an hour into the week: the producer publishes no pace then
+    /// (`SUPPRESS_AFTER_RESET_S` in `pace.py`, mirrored here), so missing
+    /// pace fields mean "too early", not missing data.
+    func isTooEarlyForPace(now: Date) -> Bool {
+        guard aheadOfPace == nil, let resetsAt else { return false }
+        let week: TimeInterval = 7 * 86_400
+        let remaining = resetsAt.timeIntervalSince(now).truncatingRemainder(dividingBy: week)
+        let elapsed = week - (remaining < 0 ? remaining + week : remaining)
+        return elapsed < 3_600
+    }
+
+    /// An exhausted window never shows a run-out time: the producer reports
+    /// its `projectedExhaustionAt` as the fetch time, a moment already past,
+    /// which read as a future "runs out".
+    func outlook(now: Date) -> WeeklyOutlook {
+        if isExhausted {
+            guard let resetsAt else { return .unknown }
+            return resetsAt > now ? .resetsIn(resetsAt) : .resetting
+        }
+        if willLastToReset == false, let runsOut = projectedExhaustionAt { return .runsOut(runsOut) }
+        if willLastToReset == true { return .lastsToReset }
+        return .unknown
+    }
+}
+
+/// What the hero's "RESETS IN" counts down to.
+enum ResetTarget: Equatable {
+    /// `weekly`: the 7d window is the binding one, so the caption says so.
+    case countdown(Date, weekly: Bool)
+    /// The binding reset is already behind us; the next snapshot catches up.
+    case resetting
+    case none
+}
+
+extension Usage {
+    /// The reset that makes the account usable again. With nothing exhausted
+    /// that is the 5h reset, as it always was. Otherwise the exhausted
+    /// windows' (5h, 7d) resets, and of those the LATER one -- the account is
+    /// blocked until every exhausted limit has reset.
+    func resetTarget(now: Date) -> ResetTarget {
+        let windows: [(window: Window?, weekly: Bool)] = [(fiveHour, false), (sevenDay, true)]
+        let exhausted = windows.filter { $0.window?.isExhausted == true }
+        let candidates = (exhausted.isEmpty ? [windows[0]] : exhausted)
+            .compactMap { pair in pair.window?.resetsAt.map { (date: $0, weekly: pair.weekly) } }
+        guard let target = candidates.max(by: { $0.date < $1.date }) else { return .none }
+        return target.date > now ? .countdown(target.date, weekly: target.weekly) : .resetting
+    }
+}
+
 extension Account {
     /// `Example Org`, `personal` or `API key` -- the line under the label.
     var subtitle: String {
         if kind == "api_key" { return "API key" }
         return organizationName.isEmpty ? "personal" : organizationName
+    }
+
+    /// The large card's auth-type tag: `OAuth` or `API Key`; nil for a kind
+    /// the widget does not know, rather than a guess.
+    var authLabel: String? {
+        switch kind {
+        case "oauth": "OAuth"
+        case "api_key": "API Key"
+        default: nil
+        }
     }
 
     /// Why there is no usage, in words. `usageStatus` is a machine string.
@@ -169,6 +296,10 @@ enum Ramp {
 enum Format {
     /// Whole percent, rounded down: 99.6 is not yet "100%".
     static func pct(_ value: Double) -> String { "\(Int(value.rounded(.down)))%" }
+
+    /// Expected-by-now, to the nearest whole percent: a target, not a limit,
+    /// so 2.9 reads "3%".
+    static func expectedPct(_ value: Double) -> String { "\(Int(value.rounded()))%" }
 
     /// A human, non-ticking countdown: `3d 11h`, `5h 12m`, `12m`, `<1m`.
     static func countdown(to date: Date, now: Date) -> String {

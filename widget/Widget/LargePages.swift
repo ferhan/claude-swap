@@ -34,32 +34,39 @@ struct LargeList: View {
     var body: some View {
         let chunks = Navigation.listChunks(for: .large, snapshot: context.snapshot)
         let index = Navigation.chunkIndex(offset: nav.listOffset, chunks: chunks)
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             BrandTitle(context: context)
-            AutoStatusLine(context: context)
-            ListHeader(family: .large, chunks: chunks, index: index)
+            // The ▲ ▼ share the auto-switch line, on its left: with the
+            // actions in the cards, a line of its own for them left no room
+            // for a third card.
+            HStack(spacing: 6) {
+                ListHeader(family: .large, chunks: chunks, index: index, showsTitle: false)
+                AutoStatusLine(context: context)
+            }
             ForEach(chunks[index], id: \.number) { account in
                 SelectableRow(account: account, context: context,
-                              isSelected: account.number == selected?.number, showsDetails: true)
+                              isSelected: account.number == selected?.number)
             }
             Spacer(minLength: 0)
         }
     }
 }
 
-/// `⇄ ClaudeSwap  as of 10:03`, the first line of large and extra-large. When
-/// the backend has stopped republishing, the time gives way to saying so and
-/// to a control that starts it.
+/// `⇄ ClaudeSwap  as of 10:03 … Auto-switch On ◉`, the first line of large
+/// and extra-large. When the backend has stopped republishing, the time gives
+/// way to saying so and to a control that starts it.
 struct BrandTitle: View {
     let context: PageContext
+    @Environment(\.widgetRenderingMode) private var mode
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "arrow.left.arrow.right")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.tint)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(mode == .fullColor ? Palette.accent(scheme) : .primary)
                 .widgetAccentable()
-            Text("ClaudeSwap").font(.system(size: 14, weight: .bold)).fixedSize()
+            Text("ClaudeSwap").font(.system(size: 13, weight: .bold)).fixedSize()
             if case .failed = context.startState {
                 // The control says "Start failed · Retry" itself; "Backend
                 // stopped" beside it would only repeat the icon and the news.
@@ -83,6 +90,8 @@ struct BrandTitle: View {
                     asOf(time)
                 }
             }
+            Spacer(minLength: 4)
+            AutoswitchHeaderToggle(context: context)
         }
     }
 
@@ -131,7 +140,7 @@ struct TrendPanel: View {
         let span = Trend.span(context.snapshot, now: context.now)
         VStack(alignment: .leading, spacing: 5) {
             HStack {
-                Text("5h usage · \(span.caption)").font(.system(size: 12.5, weight: .bold)).lineLimit(1)
+                Text("5h usage · \(span.caption)").font(.system(size: 11, weight: .semibold)).lineLimit(1)
                 Spacer()
                 // The words go before the key wraps.
                 ViewThatFits(in: .horizontal) {
@@ -158,7 +167,7 @@ struct TrendPanel: View {
             } else {
                 Spacer(minLength: 0)
                 Label("Trend available when the backend is running", systemImage: "chart.xyaxis.line")
-                    .font(.system(size: 12))
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
                 Spacer(minLength: 0)
@@ -227,8 +236,8 @@ struct TrendPanel: View {
         .chartLegend(.hidden)
         .widgetAccentable()
         // Compact: the one thing that gives way when the detail runs long, so
-        // the fact rows above it never have to be cut.
-        .frame(minHeight: compact ? 30 : nil, maxHeight: compact ? 46 : .infinity)
+        // the rows above it never have to be cut; otherwise it takes the rest.
+        .frame(minHeight: compact ? 30 : nil, maxHeight: .infinity)
     }
 
     /// The emphasized account first, then as many as fit whole in one line;
