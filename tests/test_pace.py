@@ -67,6 +67,28 @@ class TestSuppressionWindow:
         assert result.elapsed_s == elapsed
 
 
+class TestEarlyWeek:
+    def test_a_few_hours_in_has_pace_and_a_projection(self):
+        # 4.4h into the week at 13% used: the live case the 24h floor hid.
+        elapsed = 4.4 * 3600.0
+        window = _window(13.0, NOW + WEEK - elapsed)
+        result = pace.compute_pace(window, fetched_at=NOW)
+        assert result is not None
+        assert abs(result.expected_pct - 2.619) < 0.01  # 4.4 / 168 of the week
+        # 10.4 points over expected: under AHEAD_THRESHOLD_PCT, so no marker yet.
+        assert result.ahead is False
+        # The burn rate does not last the week: 13% in 4.4h reaches 100% in
+        # another 4.4h * 87/13 = ~29.4h.
+        assert pace.will_last_to_reset(result) is False
+        eta = pace.projected_exhaustion_ts(result, fetched_at=NOW)
+        assert eta is not None
+        assert abs((eta - NOW) - elapsed * 87.0 / 13.0) < 1.0
+
+    def test_twenty_points_over_a_few_hours_in_is_ahead(self):
+        window = _window(22.0, NOW + WEEK - 4.4 * 3600.0)
+        result = pace.compute_pace(window, fetched_at=NOW)
+        assert result is not None
+        assert result.ahead is True
 class TestAheadThreshold:
     def test_meaningfully_ahead_flags_true(self):
         # 1 day elapsed (~14.3% expected); 50% actual is far ahead.

@@ -100,9 +100,9 @@ final class SnapshotGoldenTests: XCTestCase {
         XCTAssertEqual(spend.resetsAt?.timeIntervalSince1970, 1_790_812_800.0)
     }
 
-    // MARK: - Account 2: pace ABSENT, personal account
+    // MARK: - Account 2: early-week pace, personal account
 
-    func testAccountTwoHasNoPaceFieldsAtAll() throws {
+    func testAccountTwoHasPaceFromTheFirstHour() throws {
         let account = snapshot.accounts[1]
         XCTAssertEqual(account.email, "second@example.com")
         XCTAssertEqual(account.organizationName, "")
@@ -126,12 +126,13 @@ final class SnapshotGoldenTests: XCTestCase {
         XCTAssertEqual(sevenDay.pct, 12.0)
         XCTAssertEqual(try XCTUnwrap(sevenDay.resetsAt).timeIntervalSince1970,
                        1_790_478_228.512345, accuracy: 0.000_01)
-        // The keys are MISSING, not null and not false: pace was not
-        // computable. nil means "unknown", which must not render as "on pace".
-        XCTAssertNil(sevenDay.expectedPct)
-        XCTAssertNil(sevenDay.aheadOfPace)
-        XCTAssertNil(sevenDay.projectedExhaustionAt)
-        XCTAssertNil(sevenDay.willLastToReset)
+        // Six hours into the week: pace is published from the first hour
+        // (it was held back for 24h until 2026-09-23), so the keys are here.
+        XCTAssertEqual(try XCTUnwrap(sevenDay.expectedPct), 3.6, accuracy: 0.001)
+        XCTAssertEqual(sevenDay.aheadOfPace, false)
+        XCTAssertEqual(try XCTUnwrap(sevenDay.projectedExhaustionAt).timeIntervalSince1970,
+                       1_790_053_424, accuracy: 0.5)
+        XCTAssertEqual(sevenDay.willLastToReset, false)
         XCTAssertEqual(sevenDay.marker, .none)
 
         XCTAssertNil(usage.spend)

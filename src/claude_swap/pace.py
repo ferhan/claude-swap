@@ -25,12 +25,15 @@ from datetime import datetime, timezone
 # Weekly windows reset on a fixed 7-day cadence.
 WEEKLY_PERIOD_S = 7 * 86400.0
 
-# Suppress the marker for this long after a weekly reset. Right after reset,
-# elapsed is tiny so `expected_pct` is near zero and almost any usage reads as
-# "far ahead" — a false positive, not a genuine pace warning. A plain
-# `elapsed == 0` guard isn't enough since a snapshot fetched shortly after
-# reset already has nonzero (if small) elapsed time.
-SUPPRESS_AFTER_RESET_S = 24 * 3600.0
+# No pace for the first hour after a weekly reset. The weekly limit is one
+# total, so the linear expected-by-now (elapsed / 168h) is meaningful at any
+# hour; the floor only keeps the first minutes -- elapsed near zero, expected
+# near 0% -- from dividing by next to nothing and projecting nonsense. (It was
+# 24h, which hid pace for a whole day; an early "ahead" is still bounded by
+# AHEAD_THRESHOLD_PCT, 15 points over expected.) A plain `elapsed == 0` guard
+# isn't enough since a snapshot fetched shortly after reset already has
+# nonzero (if small) elapsed time.
+SUPPRESS_AFTER_RESET_S = 3600.0
 
 # Minimum (actual - expected) percentage-point gap before showing a marker.
 # Below this, "ahead of pace" is within normal usage variance and would just

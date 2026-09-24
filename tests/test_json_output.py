@@ -134,7 +134,8 @@ class TestJsonHelpers:
 
     def test_usage_to_json_no_pace_fields_within_suppression_window(self):
         now = 1_700_000_000.0
-        resets_at = (datetime.fromtimestamp(now, tz=timezone.utc) + timedelta(days=7, hours=-1)).isoformat()
+        # 30 min into the week: under the 1h floor.
+        resets_at = (datetime.fromtimestamp(now, tz=timezone.utc) + timedelta(days=7, minutes=-30)).isoformat()
         usage = {"seven_day": {"pct": 50.0, "resets_at": resets_at}}
         out = usage_to_json(usage, fetched_at=now)
         assert "aheadOfPace" not in out["sevenDay"]

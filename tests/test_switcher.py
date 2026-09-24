@@ -6751,11 +6751,12 @@ class TestFormatUsageLines:
         assert "pace" not in line
 
     def test_no_pace_marker_within_suppression_window_after_reset(self):
-        # Just reset (elapsed ~0) -> suppressed even though pct looks "ahead".
+        # Just reset (30 min in, under the 1h floor) -> suppressed even though
+        # pct looks "ahead".
         from datetime import datetime, timedelta, timezone
 
         now = 1_700_000_000.0
-        resets_at = datetime.fromtimestamp(now, tz=timezone.utc) + timedelta(days=7, hours=-1)
+        resets_at = datetime.fromtimestamp(now, tz=timezone.utc) + timedelta(days=7, minutes=-30)
         usage = {"seven_day": {"pct": 50.0, "resets_at": resets_at.isoformat()}}
         line = _format_usage_lines(usage, now)[0]
         assert "pace" not in line
